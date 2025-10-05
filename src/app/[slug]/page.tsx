@@ -1,14 +1,31 @@
 import { redirect } from 'next/navigation';
-import { links } from '../api/shorten/route'; // Import dari API route
+import { supabase } from '@/lib/supabase';
 
-export default function RedirectPage({ params }: { params: { slug: string } }) {
-  const { slug } = params;
-  const originalUrl = links[slug];
+interface PageProps {
+  params: Promise<{ slug: string }>;
+}
+
+export default async function RedirectPage({ params }: PageProps) {
+  const { slug } = await params;
   
-  if (originalUrl) {
-    redirect(originalUrl);
+  // Ambil URL dari Supabase
+  const { data, error } = await supabase
+    .from('shortened_links')
+    .select('original_url')
+    .eq('slug', slug)
+    .single();
+  
+  if (error || !data) {
+    // Link tidak ditemukan, redirect ke home
+    redirect('/');
   }
   
-  // Handle 404
-  redirect('/');
+  // Increment click count menggunakan rpc function
+  supabase.rpc('increment_clicks', { slug_param: slug }).then(() => {}).catch(() => {});
+  
+  // Redirect ke URL asli
+  redirect(data.original_url);
 }
+
+// Disable static generation untuk dynamic route
+export const dynamic = 'force-dynamic';
