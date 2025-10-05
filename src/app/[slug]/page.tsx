@@ -8,24 +8,35 @@ interface PageProps {
 export default async function RedirectPage({ params }: PageProps) {
   const { slug } = await params;
   
-  // Ambil URL dari Supabase
-  const { data, error } = await supabase
-    .from('shortened_links')
-    .select('original_url')
-    .eq('slug', slug)
-    .single();
-  
-  if (error || !data) {
-    // Link tidak ditemukan, redirect ke home
+  try {
+    // Ambil URL dari Supabase
+    const { data, error } = await supabase
+      .from('shortened_links')
+      .select('original_url, clicks')
+      .eq('slug', slug)
+      .single();
+    
+    if (error || !data) {
+      console.error('Link not found:', error);
+      redirect('/');
+    }
+    
+    // Increment click count (non-blocking)
+    supabase
+      .from('shortened_links')
+      .update({ clicks: (data.clicks || 0) + 1 })
+      .eq('slug', slug)
+      .then(() => console.log('Click tracked'))
+      .catch((err) => console.error('Error tracking click:', err));
+    
+    // Redirect ke URL asli
+    redirect(data.original_url);
+  } catch (error) {
+    console.error('Error in redirect page:', error);
     redirect('/');
   }
-  
-  // Increment click count menggunakan rpc function
-  supabase.rpc('increment_clicks', { slug_param: slug }).then(() => {}).catch(() => {});
-  
-  // Redirect ke URL asli
-  redirect(data.original_url);
 }
 
 // Disable static generation untuk dynamic route
 export const dynamic = 'force-dynamic';
+export const revalidate = 0;
