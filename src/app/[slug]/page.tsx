@@ -26,8 +26,7 @@ export default async function RedirectPage({ params }: PageProps) {
       .from('shortened_links')
       .update({ clicks: (data.clicks || 0) + 1 })
       .eq('slug', slug)
-      .then(() => console.log('Click tracked'))
-      .catch((err) => console.error('Error tracking click:', err));
+      .then(() => console.log('Click tracked'), (err) => console.error('Error tracking click:', err));
     
     // Redirect ke URL asli
     redirect(data.original_url);

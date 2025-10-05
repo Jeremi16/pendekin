@@ -140,10 +140,13 @@ export async function POST(request: NextRequest) {
         { status: 500 }
       );
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Unexpected error:', error);
+    const errorMessage = typeof error === 'object' && error !== null && 'message' in error
+      ? (error as { message?: string }).message
+      : 'Unknown error';
     return NextResponse.json(
-      { error: 'Internal server error: ' + (error?.message || 'Unknown error') }, 
+      { error: 'Internal server error: ' + errorMessage }, 
       { status: 500 }
     );
   }
@@ -178,7 +181,7 @@ export async function GET(request: NextRequest) {
       originalUrl: data.original_url,
       clicks: data.clicks 
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('GET unexpected error:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
