@@ -2,28 +2,31 @@
 import { createClient } from '@supabase/supabase-js';
 import { NextRequest, NextResponse } from 'next/server';
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+// Pastikan environment variables ada
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+if (!supabaseUrl || !supabaseKey) {
+  console.error('Missing Supabase environment variables');
+}
+
+const supabase = createClient(supabaseUrl!, supabaseKey!);
+
+// Interface untuk domain config
+interface DomainConfigItem {
+  table: string;
+  prefix?: string;
+}
 
 // Konfigurasi domain dan tabel mapping
-const DOMAIN_CONFIG: Record<string, { table: string; prefix?: string }> = {
+const DOMAIN_CONFIG: Record<string, DomainConfigItem> = {
   'shortly.pp.ua': {
     table: 'links_shortly',
     prefix: 'sh'
   },
-  'link.id': {
-    table: 'links_linkid',
-    prefix: 'lk'
-  },
-  's.id': {
-    table: 'links_sid',
-    prefix: 's'
-  },
-  'tiny.id': {
-    table: 'links_tiny',
-    prefix: 'ty'
+  'pendekin.qzz.io': {
+    table: 'links_pendekin',
+    prefix: 'pk'
   }
 };
 
@@ -45,8 +48,18 @@ function validateCustomPath(path: string): boolean {
 
 export async function POST(request: NextRequest) {
   try {
+    // Cek environment variables
+    if (!supabaseUrl || !supabaseKey) {
+      return NextResponse.json(
+        { error: 'Server configuration error: Missing Supabase credentials' },
+        { status: 500 }
+      );
+    }
+
     const body = await request.json();
     const { originalUrl, customPath, domain } = body;
+
+    console.log('Request received:', { originalUrl, customPath, domain });
 
     // Validasi input
     if (!originalUrl || !domain) {
@@ -60,7 +73,7 @@ export async function POST(request: NextRequest) {
     const domainConfig = DOMAIN_CONFIG[domain];
     if (!domainConfig) {
       return NextResponse.json(
-        { error: 'Domain tidak valid' },
+        { error: `Domain tidak valid: ${domain}` },
         { status: 400 }
       );
     }
@@ -68,8 +81,8 @@ export async function POST(request: NextRequest) {
     const { table, prefix } = domainConfig;
 
     // Generate atau validate slug
-    let slug: string = '';
-
+    let slug: string;
+    
     if (customPath) {
       // Validasi custom path
       if (!validateCustomPath(customPath)) {
@@ -84,7 +97,7 @@ export async function POST(request: NextRequest) {
         .from(table)
         .select('slug')
         .eq('slug', customPath)
-        .single();
+        .maybeSingle();
 
       if (existing) {
         return NextResponse.json(
@@ -98,6 +111,7 @@ export async function POST(request: NextRequest) {
       // Generate slug acak
       let attempts = 0;
       const maxAttempts = 10;
+      slug = '';
 
       while (attempts < maxAttempts) {
         slug = generateSlug(8, prefix);
@@ -107,7 +121,7 @@ export async function POST(request: NextRequest) {
           .from(table)
           .select('slug')
           .eq('slug', slug)
-          .single();
+          .maybeSingle();
 
         if (!existing) break;
         attempts++;
@@ -129,7 +143,6 @@ export async function POST(request: NextRequest) {
           slug,
           original_url: originalUrl,
           domain,
-          created_at: new Date().toISOString(),
           clicks: 0
         }
       ])
@@ -139,7 +152,7 @@ export async function POST(request: NextRequest) {
     if (error) {
       console.error('Database error:', error);
       return NextResponse.json(
-        { error: 'Gagal menyimpan link ke database' },
+        { error: `Gagal menyimpan link: ${error.message}` },
         { status: 500 }
       );
     }
@@ -151,14 +164,14 @@ export async function POST(request: NextRequest) {
       shortUrl,
       slug,
       originalUrl,
-      domain,
-      table // untuk debugging, bisa dihapus di production
+      domain
     });
 
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Error in shorten API:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Terjadi kesalahan server';
     return NextResponse.json(
-      { error: 'Terjadi kesalahan server' },
+      { error: errorMessage },
       { status: 500 }
     );
   }
@@ -166,37 +179,46 @@ export async function POST(request: NextRequest) {
 
 // GET endpoint untuk retrieve link (opsional)
 export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
-  const slug = searchParams.get('slug');
-  const domain = searchParams.get('domain');
+  try {
+    const { searchParams } = new URL(request.url);
+    const slug = searchParams.get('slug');
+    const domain = searchParams.get('domain');
 
-  if (!slug || !domain) {
+    if (!slug || !domain) {
+      return NextResponse.json(
+        { error: 'Slug dan domain diperlukan' },
+        { status: 400 }
+      );
+    }
+
+    const domainConfig = DOMAIN_CONFIG[domain];
+    if (!domainConfig) {
+      return NextResponse.json(
+        { error: 'Domain tidak valid' },
+        { status: 400 }
+      );
+    }
+
+    const { data, error } = await supabase
+      .from(domainConfig.table)
+      .select('*')
+      .eq('slug', slug)
+      .single();
+
+    if (error || !data) {
+      return NextResponse.json(
+        { error: 'Link tidak ditemukan' },
+        { status: 404 }
+      );
+    }
+
+    return NextResponse.json(data);
+  } catch (error) {
+    console.error('Error in GET:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Terjadi kesalahan server';
     return NextResponse.json(
-      { error: 'Slug dan domain diperlukan' },
-      { status: 400 }
+      { error: errorMessage },
+      { status: 500 }
     );
   }
-
-  const domainConfig = DOMAIN_CONFIG[domain];
-  if (!domainConfig) {
-    return NextResponse.json(
-      { error: 'Domain tidak valid' },
-      { status: 400 }
-    );
-  }
-
-  const { data, error } = await supabase
-    .from(domainConfig.table)
-    .select('*')
-    .eq('slug', slug)
-    .single();
-
-  if (error || !data) {
-    return NextResponse.json(
-      { error: 'Link tidak ditemukan' },
-      { status: 404 }
-    );
-  }
-
-  return NextResponse.json(data);
 }

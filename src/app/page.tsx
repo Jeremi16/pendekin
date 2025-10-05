@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useState } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 
 export default function LinkShortener() {
   const [originalUrl, setOriginalUrl] = useState('');
@@ -12,10 +12,27 @@ export default function LinkShortener() {
   const [copied, setCopied] = useState(false);
   const [selectedDomain, setSelectedDomain] = useState('shortly.pp.ua');
 
-  const availableDomains = [
-    'shortly.pp.ua',
-    'pendekin.qzz.io'
-  ];
+  // Ambil daftar domain dari environment variable (useMemo untuk stability)
+  const availableDomains = useMemo(() => {
+    return (typeof window !== 'undefined' 
+      ? process.env.NEXT_PUBLIC_AVAILABLE_DOMAINS 
+      : process.env.AVAILABLE_DOMAINS
+    )?.split(',')
+      .map(domain => domain.trim())
+      .filter(Boolean) || ['shortly.pp.ua', 'pendekin.qzz.io']; // Fallback default
+  }, []); // Empty deps karena env static
+
+  // Deteksi domain otomatis dari header (dari middleware)
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const currentDomain = document.querySelector('meta[name="current-domain"]')?.getAttribute('content') ||
+                            localStorage.getItem('current-domain') || // Fallback jika meta tidak ada
+                            availableDomains[0];
+      if (availableDomains.includes(currentDomain)) {
+        setSelectedDomain(currentDomain);
+      }
+    }
+  }, [availableDomains]); // Sekarang stable, no infinite loop
 
   const normalizeUrl = (url: string): string => {
     const trimmedUrl = url.trim();
@@ -54,7 +71,14 @@ export default function LinkShortener() {
     }
   };
 
-  const handleShorten = async () => {
+  // Validasi customPath (mirip slug di middleware)
+  const validateCustomPath = (path: string): boolean => {
+    if (!path.trim()) return true; // Opsional
+    const slugPattern = /^[a-zA-Z0-9-_]+$/;
+    return slugPattern.test(path.trim());
+  };
+
+  const handleShorten = useCallback(async () => {
     if (!originalUrl.trim()) {
       setError('Silakan masukkan URL yang valid');
       return;
@@ -64,6 +88,11 @@ export default function LinkShortener() {
 
     if (!validateUrl(normalizedUrl)) {
       setError('URL tidak valid. Harus berupa domain dengan ekstensi (contoh: google.com, example.co.id)');
+      return;
+    }
+
+    if (!validateCustomPath(customPath)) {
+      setError('Path kustom tidak valid. Hanya huruf, angka, -, dan _ yang diizinkan');
       return;
     }
 
@@ -86,7 +115,11 @@ export default function LinkShortener() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || 'Gagal membuat link pendek');
+        // FIX: Check multiple common error keys for better message extraction
+        const errorMessage = data.error || data.message || data.detail || 'Gagal membuat link pendek';
+        // Log full data for debugging (remove in prod)
+        console.error('API Error Response:', { status: response.status, data });
+        throw new Error(errorMessage);
       }
 
       setShortUrl(data.shortUrl);
@@ -98,9 +131,9 @@ export default function LinkShortener() {
     } finally {
       setIsGenerating(false);
     }
-  };
+  }, [originalUrl, customPath, selectedDomain]);
 
-  const copyToClipboard = async () => {
+  const copyToClipboard = useCallback(async () => {
     if (shortUrl) {
       try {
         await navigator.clipboard.writeText(shortUrl);
@@ -110,23 +143,39 @@ export default function LinkShortener() {
         console.error('Failed to copy: ', err);
       }
     }
-  };
+  }, [shortUrl]);
 
-  const resetForm = () => {
+  const resetForm = useCallback(() => {
     setOriginalUrl('');
     setCustomPath('');
     setShortUrl('');
     setError('');
-  };
+  }, []);
 
-  const handleUrlBlur = () => {
+  const handleUrlBlur = useCallback(() => {
     if (originalUrl.trim()) {
       const normalized = normalizeUrl(originalUrl);
       if (normalized !== originalUrl) {
         setOriginalUrl(normalized);
       }
     }
-  };
+  }, [originalUrl]);
+
+  // Set meta tag untuk domain detection (dari middleware header)
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      // FIX: Cleanup existing meta to avoid duplicates
+      const existingMeta = document.querySelector('meta[name="current-domain"]');
+      if (existingMeta) {
+        existingMeta.remove();
+      }
+      const meta = document.createElement('meta');
+      meta.name = 'current-domain';
+      meta.content = selectedDomain;
+      document.head.appendChild(meta);
+      localStorage.setItem('current-domain', selectedDomain); // Persist untuk SPA navigation
+    }
+  }, [selectedDomain]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center p-4">
@@ -161,16 +210,17 @@ export default function LinkShortener() {
                 onBlur={handleUrlBlur}
                 placeholder="google.com, example.co.id"
                 className="w-full px-5 py-4 bg-slate-900/50 border border-slate-700 rounded-2xl text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-transparent transition-all backdrop-blur-sm"
+                aria-describedby="url-help"
               />
               {error && (
-                <p className="text-red-400 text-sm mt-2 flex items-center gap-2">
-                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                <p className="text-red-400 text-sm mt-2 flex items-center gap-2" role="alert">
+                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
                     <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
                   </svg>
                   {error}
                 </p>
               )}
-              <p className="text-slate-500 text-xs mt-2">
+              <p id="url-help" className="text-slate-500 text-xs mt-2">
                 Domain dengan ekstensi akan otomatis ditambahkan https://
               </p>
             </div>
@@ -186,6 +236,7 @@ export default function LinkShortener() {
                   value={selectedDomain}
                   onChange={(e) => setSelectedDomain(e.target.value)}
                   className="w-full px-5 py-4 bg-slate-900/50 border border-slate-700 rounded-2xl text-slate-200 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-transparent transition-all backdrop-blur-sm appearance-none cursor-pointer"
+                  aria-label="Pilih domain untuk link pendek"
                 >
                   {availableDomains.map((domain) => (
                     <option key={domain} value={domain} className="bg-slate-900">
@@ -194,7 +245,7 @@ export default function LinkShortener() {
                   ))}
                 </select>
                 <div className="absolute right-5 top-1/2 -translate-y-1/2 pointer-events-none">
-                  <svg className="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                   </svg>
                 </div>
@@ -215,10 +266,11 @@ export default function LinkShortener() {
                   onChange={(e) => setCustomPath(e.target.value)}
                   placeholder="nama-unik"
                   className="flex-1 bg-transparent text-slate-200 placeholder-slate-600 focus:outline-none"
+                  aria-describedby="path-help"
                 />
               </div>
-              <p className="text-slate-500 text-xs mt-2">
-                Kosongkan untuk slug acak 8 karakter
+              <p id="path-help" className="text-slate-500 text-xs mt-2">
+                Kosongkan untuk slug acak 8 karakter. Hanya huruf, angka, -, dan _ yang diizinkan.
               </p>
             </div>
 
@@ -232,10 +284,11 @@ export default function LinkShortener() {
                     ? 'bg-slate-700/50 text-slate-500 cursor-not-allowed'
                     : 'bg-gradient-to-r from-cyan-600 to-blue-600 text-white hover:from-cyan-500 hover:to-blue-500 shadow-lg shadow-cyan-500/25'
                 }`}
+                aria-label={isGenerating ? "Memproses..." : "Buat link pendek"}
               >
                 {isGenerating ? (
                   <span className="flex items-center justify-center gap-2">
-                    <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
@@ -243,7 +296,7 @@ export default function LinkShortener() {
                   </span>
                 ) : (
                   <span className="flex items-center justify-center gap-2">
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                     </svg>
                     Buat Link Pendek
@@ -255,8 +308,9 @@ export default function LinkShortener() {
                 <button
                   onClick={resetForm}
                   className="px-5 py-4 bg-slate-700/50 text-slate-300 rounded-2xl hover:bg-slate-700 transition-all duration-300 border border-slate-600/50"
+                  aria-label="Reset form"
                 >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                   </svg>
                 </button>
@@ -267,14 +321,14 @@ export default function LinkShortener() {
             {shortUrl && (
               <div className="mt-6 p-6 bg-gradient-to-br from-slate-800/50 to-slate-900/50 backdrop-blur-sm rounded-2xl border border-slate-700/50">
                 <h3 className="text-sm font-medium text-cyan-400 mb-4 flex items-center gap-2">
-                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
                     <path fillRule="evenodd" d="M6.267 3.455a3.066 3.066 0 001.745-.723 3.066 3.066 0 013.976 0 3.066 3.066 0 001.745.723 3.066 3.066 0 012.812 2.812c.051.643.304 1.254.723 1.745a3.066 3.066 0 010 3.976 3.066 3.066 0 00-.723 1.745 3.066 3.066 0 01-2.812 2.812 3.066 3.066 0 00-1.745.723 3.066 3.066 0 01-3.976 0 3.066 3.066 0 00-1.745-.723 3.066 3.066 0 01-2.812-2.812 3.066 3.066 0 00-.723-1.745 3.066 3.066 0 010-3.976 3.066 3.066 0 00.723-1.745 3.066 3.066 0 012.812-2.812zm7.44 5.252a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
                   </svg>
                   Link Pendek Berhasil Dibuat
                 </h3>
                 <div className="flex flex-col sm:flex-row gap-3">
                   <div className="flex-1 px-4 py-3 bg-slate-900/70 border border-slate-700/50 rounded-xl">
-                    <p className="text-slate-200 font-mono text-sm truncate">{shortUrl}</p>
+                    <p className="text-slate-200 font-mono text-sm truncate" title={shortUrl}>{shortUrl}</p>
                   </div>
                   <button
                     onClick={copyToClipboard}
@@ -283,17 +337,18 @@ export default function LinkShortener() {
                         ? 'bg-green-600 text-white'
                         : 'bg-gradient-to-r from-cyan-600 to-blue-600 text-white hover:from-cyan-500 hover:to-blue-500'
                     }`}
+                    aria-label={copied ? "Tersalin ke clipboard" : "Salin link pendek"}
                   >
                     {copied ? (
                       <span className="flex items-center gap-2">
-                        <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                        <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
                           <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
                         </svg>
                         Tersalin!
                       </span>
                     ) : (
                       <span className="flex items-center gap-2">
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
                         </svg>
                         Salin
@@ -302,10 +357,10 @@ export default function LinkShortener() {
                   </button>
                 </div>
                 <p className="text-slate-500 text-xs mt-4 flex items-center gap-2">
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
                   </svg>
-                  Redirect ke: <span className="text-cyan-400 truncate">{originalUrl}</span>
+                  Redirect ke: <span className="text-cyan-400 truncate" title={originalUrl}>{originalUrl}</span>
                 </p>
               </div>
             )}
@@ -317,7 +372,6 @@ export default function LinkShortener() {
               <Link href="https://jere.work" target="_blank" className="hover:text-cyan-400 transition-colors">
                 Powered by jere.work
               </Link>
-              
             </p>
           </div>
         </div>
