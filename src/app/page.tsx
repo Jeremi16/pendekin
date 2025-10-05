@@ -13,7 +13,8 @@ export default function LinkShortener() {
   const [selectedDomain, setSelectedDomain] = useState('shortly.pp.ua');
 
   const availableDomains = [
-    'shortly.pp.ua'
+    'shortly.pp.ua',
+    'pendekin.qzz.io'
   ];
 
   const normalizeUrl = (url: string): string => {

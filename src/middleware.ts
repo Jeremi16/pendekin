@@ -1,85 +1,73 @@
+// middleware.ts (di root project)
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+// Daftar domain yang valid
+const VALID_DOMAINS = [
+  'shortly.pp.ua',
+  'link.id',
+  's.id',
+  'tiny.id',
+  'localhost:3000', // untuk development
+];
 
-export async function middleware(request: NextRequest) {
-  const pathname = request.nextUrl.pathname;
-  
-  console.log('🔍 Middleware intercepting:', pathname);
-  
-  // Skip routes yang tidak perlu redirect
+export function middleware(request: NextRequest) {
+  const { pathname, host } = request.nextUrl;
+
+  // Skip untuk API routes, _next, dan static files
   if (
-    pathname === '/' || 
-    pathname.startsWith('/api/') || 
+    pathname.startsWith('/api/') ||
     pathname.startsWith('/_next/') ||
-    pathname.startsWith('/debug') ||
-    pathname.startsWith('/test') ||
-    pathname.includes('.') // Skip files like favicon.ico
+    pathname.startsWith('/favicon.ico') ||
+    pathname.includes('.')
   ) {
-    console.log('⏭️  Skipping:', pathname);
     return NextResponse.next();
   }
-  
-  // Extract slug (remove leading slash)
-  const slug = pathname.slice(1);
-  
-  console.log('🎯 Processing slug:', slug);
-  
-  try {
-    // Create Supabase client
-    const supabase = createClient(supabaseUrl, supabaseKey);
-    
-    // Query database
-    const { data, error } = await supabase
-      .from('shortened_links')
-      .select('original_url, clicks')
-      .eq('slug', slug)
-      .maybeSingle();
-    
-    console.log('📊 Query result:', { 
-      found: !!data, 
-      error: error?.message 
-    });
-    
-    if (error) {
-      console.error('❌ Database error:', error);
-      return NextResponse.redirect(new URL('/', request.url));
-    }
-    
-    if (!data) {
-      console.log('❌ Slug not found:', slug);
-      return NextResponse.redirect(new URL('/', request.url));
-    }
-    
-    console.log('✅ Redirecting to:', data.original_url);
-    
-    // Increment clicks (fire and forget - proper async handling)
-    void supabase
-      .from('shortened_links')
-      .update({ clicks: (data.clicks || 0) + 1 })
-      .eq('slug', slug)
-      .then(
-        () => console.log('📈 Click tracked'),
-        (err: unknown) => console.error('⚠️ Click tracking error:', err)
-      );
-    
-    // Perform redirect
-    return NextResponse.redirect(data.original_url, { status: 307 });
-    
-  } catch (error: unknown) {
-    console.error('💥 Middleware error:', error);
-    return NextResponse.redirect(new URL('/', request.url));
+
+  // Validasi domain
+  const isValidDomain = VALID_DOMAINS.some(domain => 
+    host.includes(domain)
+  );
+
+  if (!isValidDomain) {
+    return new NextResponse('Domain not allowed', { status: 403 });
   }
+
+  // Homepage route (/)
+  if (pathname === '/') {
+    // Tambahkan header untuk domain detection
+    const response = NextResponse.next();
+    response.headers.set('x-current-domain', host);
+    return response;
+  }
+
+  // Slug route (redirect)
+  // Format: /[slug]
+  const slug = pathname.substring(1); // Remove leading slash
+
+  if (slug && slug.length > 0) {
+    // Validasi slug format
+    const slugPattern = /^[a-zA-Z0-9-_]+$/;
+    
+    if (!slugPattern.test(slug)) {
+      return new NextResponse('Invalid slug format', { status: 400 });
+    }
+
+    // Pass ke redirect handler
+    const response = NextResponse.next();
+    response.headers.set('x-current-domain', host);
+    response.headers.set('x-slug', slug);
+    return response;
+  }
+
+  return NextResponse.next();
 }
 
 export const config = {
   matcher: [
     /*
-     * Match all request paths except for the ones starting with:
-     * - api (API routes)
+     * Match semua request paths kecuali:
+     * - api routes
      * - _next/static (static files)
      * - _next/image (image optimization files)
      * - favicon.ico (favicon file)
