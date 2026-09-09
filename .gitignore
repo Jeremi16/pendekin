@@ -1,0 +1,33 @@
+# deps
+node_modules/
+frontend/node_modules/
+backend/vendor/
+
+# builds
+frontend/dist/
+frontend/build/
+
+# env
+.env
+.env.local
+backend/.env
+frontend/.env
+!.env.example
+!frontend/.env.example
+!backend/.env.example
+
+# logs
+*.log
+npm-debug.log*
+
+# ide
+.vscode/
+.idea/
+.DS_Store
+
+# go
+*.exe
+*.test
+
+# tmp
+tmp/
