@@ -5,7 +5,7 @@ domain** (no CORS, same-origin cookies):
 
 | Shape | Frontend | Backend | Gateway |
 |---|---|---|---|
-| **Vercel** (serverless) | static build | Go function (`api/handler.go`) | Vercel edge (`vercel.json` rewrites) |
+| **Vercel** (services) | `frontend` service (Vite) | `backend` service (Go, `backend/main.go`) | Vercel edge (`vercel.json` rewrites) |
 | **Self-host** (docker compose / Coolify) | nginx container | Go container | nginx or Traefik |
 
 ## Vercel (one project, one domain)
@@ -13,11 +13,9 @@ domain** (no CORS, same-origin cookies):
 Repo layout that makes it work:
 
 ```
-api/handler.go     → the whole chi router as one Go serverless function
-api/go.mod         → thin module with `replace pendekin => ../backend`
-vercel.json        → build + rewrites (replaces nginx.conf's role)
-frontend/          → Vite build (unchanged)
-backend/           → Go server (unchanged; `server.New` is shared by both shapes)
+vercel.json        → two services + public rewrites (replaces nginx.conf's role)
+frontend/          → `frontend` service: Vite build with bun
+backend/           → `backend` service: the same Go server binary as self-host
 ```
 
 ### Steps
@@ -27,7 +25,7 @@ backend/           → Go server (unchanged; `server.New` is shared by both shap
 2. **Neon**: use the **pooled** connection string (host contains `-pooler`) — each warm
    serverless instance holds its own pool, and pooled mode protects Neon's connection limit.
 3. **Vercel**: import the Git repo (root directory = repo root). `vercel.json` already
-   defines the build (`cd frontend && bun install && bun run build` → `frontend/dist`).
+   defines both services and their builds.
 4. **Env vars** (Project → Settings → Environment Variables):
 
    ```
@@ -58,14 +56,15 @@ Local dry-run of the same shape: `vercel login && vercel dev` (uses `vercel.json
 ### How requests flow on Vercel
 
 ```
-your-app.vercel.app/            → static React files
-your-app.vercel.app/api/*       → rewritten to /api/handler (Go function)
-your-app.vercel.app/{code}      → rewritten (regex 4–32 chars, same rule as nginx.conf)
-your-app.vercel.app/health|ready → rewritten (function)
+your-app.vercel.app/api/*        → backend
+your-app.vercel.app/health|ready → backend
+your-app.vercel.app/{code}       → backend (regex 4–32 chars, same rule as nginx.conf)
+your-app.vercel.app/*            → frontend (static React files)
 ```
 
-The function restores the original path from query params (`__path` / `code`) and serves
-it with the full chi router — the same router the self-host binary mounts.
+Requests keep their original path, so the chi router serves them exactly as on self-host.
+No service bindings: the browser calls `/api` on the same origin and the backend never
+calls the frontend.
 
 ## Self-host (docker compose / Coolify)
 
@@ -138,7 +137,7 @@ GET /api/auth/nodryx/verify    → (logged-in) refreshes the token pair when exp
 ## Troubleshooting
 
 - **Go build fails on Vercel** — the runtime's Go version must be ≥ the `go` directive in
-  `api/go.mod` / `backend/go.mod`. Lower both if the platform lags behind.
+  `backend/go.mod`. Lower it if the platform lags behind.
 - **429s never trigger** — `UPSTASH_*` not set (falls back to per-instance memory).
 - **Wrong client IPs in stats/logs** — `TRUST_PROXY=1` missing on Vercel (or set by
   mistake on a directly-exposed self-host).
