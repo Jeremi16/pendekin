@@ -5,52 +5,56 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/url"
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var (
-	slugRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{4,32}$`)
+	slugRe  = regexp.MustCompile(`^[a-zA-Z0-9_-]{4,32}$`)
+	colorRe = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
+
 	reservedCodes = map[string]bool{
 		"admin": true, "api": true, "auth": true, "dashboard": true,
 		"health": true, "ready": true, "history": true, "links": true,
 		"shorten": true, "static": true, "assets": true, "www": true,
 		"login": true, "register": true, "public": true,
 	}
+	dotsTypes    = map[string]bool{"square": true, "dots": true, "rounded": true, "classy": true, "extra-rounded": true}
+	cornersTypes = map[string]bool{"square": true, "dot": true, "extra-rounded": true}
 )
 
 const DefaultPageSize = 20
 
 func NormalizeURL(input string) (string, bool) {
-	if input == "" {
-		return "", false
-	}
 	trimmed := strings.TrimSpace(input)
 	if trimmed == "" {
 		return "", false
 	}
-	// Block dangerous schemes
 	lower := strings.ToLower(trimmed)
 	if strings.HasPrefix(lower, "javascript:") || strings.HasPrefix(lower, "data:") || strings.HasPrefix(lower, "file:") {
 		return "", false
 	}
 	withProto := trimmed
-	if !strings.HasPrefix(strings.ToLower(trimmed), "http://") && !strings.HasPrefix(strings.ToLower(trimmed), "https://") {
+	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
 		withProto = "https://" + trimmed
 	}
 	parsed, err := url.Parse(withProto)
 	if err != nil || parsed.Host == "" {
 		return "", false
 	}
-	// Block private / loopback hosts by string check (deep DNS check is at handler)
 	host := strings.ToLower(parsed.Hostname())
-	if host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0" || host == "::1" {
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
 		return "", false
 	}
-	if strings.HasPrefix(host, "10.") || strings.HasPrefix(host, "192.168.") || strings.HasPrefix(host, "172.") {
-		// allow 172.16-31 private; be permissive for now — full IP check done via DNS lookup if needed
+	// Block literal private / loopback / link-local IPs (DNS names are not resolved)
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return "", false
+		}
 	}
 	return parsed.String(), true
 }
@@ -60,8 +64,8 @@ func NormalizeTitle(input string) *string {
 	if t == "" {
 		return nil
 	}
-	if len(t) > 120 {
-		t = t[:120]
+	if utf8.RuneCountInString(t) > 120 {
+		t = string([]rune(t)[:120])
 	}
 	return &t
 }
@@ -74,10 +78,14 @@ func NormalizeCustomSlug(input string) (string, string) {
 	if !slugRe.MatchString(v) {
 		return "", "Custom slug must be 4-32 chars using letters, numbers, - or _"
 	}
-	if reservedCodes[strings.ToLower(v)] {
+	if IsReserved(v) {
 		return "", "Custom slug is reserved"
 	}
 	return v, ""
+}
+
+func IsReserved(code string) bool {
+	return reservedCodes[strings.ToLower(code)]
 }
 
 func NormalizeExpiry(input string, maxDays int) (*time.Time, string) {
@@ -86,7 +94,7 @@ func NormalizeExpiry(input string, maxDays int) (*time.Time, string) {
 	}
 	t, err := time.Parse(time.RFC3339, input)
 	if err != nil {
-		// try datetime-local format 2006-01-02T15:04
+		// datetime-local fallback (no zone; interpreted as UTC)
 		t2, err2 := time.Parse("2006-01-02T15:04", input)
 		if err2 != nil {
 			return nil, "Invalid expiry date"
@@ -103,27 +111,23 @@ func NormalizeExpiry(input string, maxDays int) (*time.Time, string) {
 }
 
 func NormalizeQrConfig(input map[string]interface{}) map[string]interface{} {
-	if input == nil {
-		return map[string]interface{}{}
-	}
 	safe := make(map[string]interface{})
-	if v, ok := input["dotsColor"].(string); ok && v != "" {
-		safe["dotsColor"] = v
+	if input == nil {
+		return safe
 	}
-	if v, ok := input["backgroundColor"].(string); ok && v != "" {
-		safe["backgroundColor"] = v
+	for _, k := range []string{"dotsColor", "backgroundColor", "gradientColor2"} {
+		if v, ok := input[k].(string); ok && colorRe.MatchString(v) {
+			safe[k] = v
+		}
 	}
-	if v, ok := input["dotsType"].(string); ok && v != "" {
+	if v, ok := input["dotsType"].(string); ok && dotsTypes[v] {
 		safe["dotsType"] = v
 	}
-	if v, ok := input["cornersType"].(string); ok && v != "" {
+	if v, ok := input["cornersType"].(string); ok && cornersTypes[v] {
 		safe["cornersType"] = v
 	}
 	if v, ok := input["gradient"].(bool); ok {
 		safe["gradient"] = v
-	}
-	if v, ok := input["gradientColor2"].(string); ok && v != "" {
-		safe["gradientColor2"] = v
 	}
 	return safe
 }
@@ -147,30 +151,31 @@ func GetBaseURL(appBaseURL, proto, host string) string {
 	return fmt.Sprintf("%s://%s", proto, host)
 }
 
+// GenerateShortCode returns a uniformly random base62 string (rejection sampling avoids modulo bias).
 func GenerateShortCode(length int) string {
 	if length <= 0 {
 		length = 7
 	}
-	// base64url approx length*3/4 bytes
-	need := (length*6 + 7) / 8 // slightly over
-	if need < 6 {
-		need = 6
-	}
-	b := make([]byte, need)
-	_, _ = rand.Read(b)
-	// Generate alphanumeric base62
 	const chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-	out := make([]byte, length)
-	for i := 0; i < length; i++ {
-		out[i] = chars[int(b[i%len(b)])%len(chars)]
+	const maxByte = 256 - (256 % len(chars)) // 248
+	out := make([]byte, 0, length)
+	buf := make([]byte, length*2)
+	for len(out) < length {
+		_, _ = rand.Read(buf)
+		for _, b := range buf {
+			if int(b) >= maxByte {
+				continue
+			}
+			out = append(out, chars[int(b)%len(chars)])
+			if len(out) == length {
+				break
+			}
+		}
 	}
 	return string(out)
 }
 
 func HashIP(appSecret, ip string) string {
-	if appSecret == "" {
-		appSecret = "pendekin"
-	}
 	h := sha256.Sum256([]byte(appSecret + ":" + ip))
 	return hex.EncodeToString(h[:])
 }
@@ -180,26 +185,4 @@ func IsExpired(expiresAt *time.Time, now time.Time) bool {
 		return false
 	}
 	return !expiresAt.After(now)
-}
-
-func ExtractShortCode(shortURL string) string {
-	if shortURL == "" {
-		return ""
-	}
-	u, err := url.Parse(shortURL)
-	if err == nil && u.Path != "" {
-		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-		if len(parts) > 0 {
-			return parts[len(parts)-1]
-		}
-	}
-	// fallback
-	s := strings.Split(shortURL, "?")[0]
-	s = strings.Split(s, "#")[0]
-	s = strings.TrimRight(s, "/")
-	parts := strings.Split(s, "/")
-	if len(parts) > 0 {
-		return parts[len(parts)-1]
-	}
-	return ""
 }

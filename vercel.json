@@ -1,0 +1,19 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "echo \"install is handled inside buildCommand\"",
+  "buildCommand": "cd frontend && bun install && bun run build",
+  "outputDirectory": "frontend/dist",
+  "headers": [
+    {
+      "source": "/assets/(.*)",
+      "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }]
+    }
+  ],
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "/api/handler?__path=/api/:path*" },
+    { "source": "/health", "destination": "/api/handler?__path=/health" },
+    { "source": "/ready", "destination": "/api/handler?__path=/ready" },
+    { "source": "/:code([A-Za-z0-9_-]{4,32})", "destination": "/api/handler?code=:code" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}

@@ -30,7 +30,7 @@ func Pool(cfg *config.Config) *pgxpool.Pool {
 			log.Printf("[ERROR] invalid DATABASE_URL: %v", err)
 			return
 		}
-		c.MaxConns = 8
+		c.MaxConns = int32(cfg.DBMaxConns)
 		c.MinConns = 1
 		// Lower-case check for neon host to warn if sslmode missing
 		if strings.Contains(strings.ToLower(cfg.DatabaseURL), "neon.tech") && !strings.Contains(cfg.DatabaseURL, "sslmode=") {

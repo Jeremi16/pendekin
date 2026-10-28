@@ -2,43 +2,28 @@ package link
 
 import (
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"pendekin/auth"
 	"pendekin/config"
+	mw "pendekin/middleware"
 )
-
-var reserved = map[string]bool{
-	"admin": true, "api": true, "auth": true, "dashboard": true,
-	"health": true, "ready": true, "history": true, "links": true,
-	"shorten": true, "static": true, "assets": true, "www": true,
-	"login": true, "register": true, "public": true,
-}
 
 type Handler struct {
 	Pool *pgxpool.Pool
 	Cfg  *config.Config
 }
 
-func (h *Handler) Routes() chi.Router {
-	r := chi.NewRouter()
-	r.Get("/health", h.Health)
-	r.Get("/ready", h.Ready)
-	r.Get("/links", h.ListLinks)
-	r.Post("/links", h.CreateLink)
-	r.Post("/shorten", h.CreateLink)
-	r.Get("/links/{code}/stats", h.LinkStats)
-	r.Get("/{code}", h.Redirect)
-	return r
-}
-
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok":       true,
 		"database": h.Cfg.DatabaseURL != "",
 		"baseUrl":  h.Cfg.AppBaseURL,
@@ -47,19 +32,30 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
 	if h.Pool == nil {
-		w.WriteHeader(500)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": "DATABASE_URL not set"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{"ok": false, "error": "DATABASE_URL not set"})
 		return
 	}
 	if err := h.Pool.Ping(r.Context()); err != nil {
-		w.WriteHeader(500)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": err.Error()})
+		log.Printf("[ERROR] ready ping: %v", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{"ok": false, "error": "database unavailable"})
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
 }
 
+func (h *Handler) creatorHash(r *http.Request) string {
+	return HashIP(h.Cfg.AppSecret, mw.ClientIP(r))
+}
+
+// scope limits list/stats to the logged-in account, or to the anonymous creator's IP.
+func (h *Handler) scope(r *http.Request) Scope {
+	if a := auth.FromContext(r.Context()); a != nil {
+		return Scope{OwnerID: &a.ID}
+	}
+	return Scope{CreatorHash: h.creatorHash(r)}
+}
+
+// ListLinks returns the caller's links (by account when logged in, else by IP).
 func (h *Handler) ListLinks(w http.ResponseWriter, r *http.Request) {
 	if h.Pool == nil {
 		writeJSON(w, 500, map[string]interface{}{"error": "DATABASE_URL not set"})
@@ -70,9 +66,9 @@ func (h *Handler) ListLinks(w http.ResponseWriter, r *http.Request) {
 	status := NormalizeStatus(q.Get("status"))
 	page, _ := strconv.Atoi(q.Get("page"))
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	links, total, err := ListLinks(r.Context(), h.Pool, search, status, page, limit)
+	links, total, err := ListLinks(r.Context(), h.Pool, h.scope(r), search, status, "", page, limit)
 	if err != nil {
-		writeJSON(w, 500, map[string]interface{}{"error": err.Error()})
+		internalError(w, "list links", err)
 		return
 	}
 	if links == nil {
@@ -81,13 +77,14 @@ func (h *Handler) ListLinks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]interface{}{"links": links, "total": total, "page": page, "limit": limit})
 }
 
+// LinkStats returns stats only to the link's owner/creator.
 func (h *Handler) LinkStats(w http.ResponseWriter, r *http.Request) {
 	if h.Pool == nil {
 		writeJSON(w, 500, map[string]interface{}{"error": "DATABASE_URL not set"})
 		return
 	}
 	code := chi.URLParam(r, "code")
-	l, err := GetLinkByCode(r.Context(), h.Pool, code)
+	l, err := GetScopedLinkByCode(r.Context(), h.Pool, code, h.scope(r))
 	if err != nil {
 		writeJSON(w, 404, map[string]interface{}{"error": "Not found"})
 		return
@@ -108,7 +105,6 @@ func (h *Handler) CreateLink(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]interface{}{"error": "DATABASE_URL is required"})
 		return
 	}
-	// limit body already via middleware in main.go, but double-check
 	var req createReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, 400, map[string]interface{}{"error": "Invalid JSON"})
@@ -119,11 +115,6 @@ func (h *Handler) CreateLink(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		writeJSON(w, 400, map[string]interface{}{"error": "A valid URL is required (no localhost/private IP)"})
 		return
-	}
-	// Block self-loop
-	if h.Cfg.AppBaseURL != "" && strings.HasPrefix(normalized, h.Cfg.AppBaseURL) {
-		// allow but warn; check for loop to own short code? For now block exact baseURL loop
-		// e.g. https://lynk.pmkitera.com/abc -> would loop, but normalized is full short_url, not code. So allow.
 	}
 
 	title := NormalizeTitle(req.Title)
@@ -144,11 +135,7 @@ func (h *Handler) CreateLink(w http.ResponseWriter, r *http.Request) {
 	qr := NormalizeQrConfig(req.QrConfig)
 
 	// Determine base URL: APP_BASE_URL or request host
-	proto := r.Header.Get("X-Forwarded-Proto")
-	if proto != "" {
-		proto = strings.Split(proto, ",")[0]
-		proto = strings.TrimSpace(proto)
-	}
+	proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])
 	if proto == "" {
 		if r.TLS != nil {
 			proto = "https"
@@ -156,31 +143,23 @@ func (h *Handler) CreateLink(w http.ResponseWriter, r *http.Request) {
 			proto = "http"
 		}
 	}
-	host := r.Host
-	if host == "" {
-		host = r.Header.Get("Host")
-	}
-	baseURL := GetBaseURL(h.Cfg.AppBaseURL, proto, host)
+	baseURL := GetBaseURL(h.Cfg.AppBaseURL, proto, r.Host)
 
-	// Generate or use custom slug
+	// Generate or use custom slug; the unique index is the final arbiter on races.
 	var shortCode string
 	if slug != "" {
 		shortCode = slug
-		// check collision globally
-		existing, _ := GetLinkByCode(r.Context(), h.Pool, shortCode)
-		if existing != nil {
+		if existing, _ := GetLinkByCode(r.Context(), h.Pool, shortCode); existing != nil {
 			writeJSON(w, 409, map[string]interface{}{"error": "Custom slug is already in use"})
 			return
 		}
 	} else {
-		// generate unique
 		for attempt := 0; attempt < 8; attempt++ {
 			cand := GenerateShortCode(7)
-			if reserved[strings.ToLower(cand)] {
+			if IsReserved(cand) {
 				continue
 			}
-			existing, _ := GetLinkByCode(r.Context(), h.Pool, cand)
-			if existing == nil {
+			if existing, _ := GetLinkByCode(r.Context(), h.Pool, cand); existing == nil {
 				shortCode = cand
 				break
 			}
@@ -191,21 +170,23 @@ func (h *Handler) CreateLink(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	shortURL := baseURL + "/" + shortCode
+	var ownerID *int64
+	if a := auth.FromContext(r.Context()); a != nil {
+		ownerID = &a.ID
+	}
 	var customSlugPtr *string
 	if slug != "" {
 		customSlugPtr = &slug
 	}
-	ipHash := HashIP(h.Cfg.AppSecret, clientIP(r))
 
-	lnk, err := CreateLink(r.Context(), h.Pool, title, normalized, shortURL, shortCode, customSlugPtr, expiresAt, qr, ipHash)
+	lnk, err := CreateLink(r.Context(), h.Pool, title, normalized, baseURL+"/"+shortCode, shortCode, customSlugPtr, expiresAt, qr, h.creatorHash(r), ownerID)
 	if err != nil {
-		// handle unique violation
-		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "23505") {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			writeJSON(w, 409, map[string]interface{}{"error": "Slug already in use"})
 			return
 		}
-		writeJSON(w, 500, map[string]interface{}{"error": err.Error()})
+		internalError(w, "create link", err)
 		return
 	}
 
@@ -215,45 +196,76 @@ func (h *Handler) CreateLink(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Handler) Redirect(w http.ResponseWriter, r *http.Request) {
+// resolve picks the live link for a short code, or writes an error page.
+func (h *Handler) resolve(w http.ResponseWriter, r *http.Request) *Link {
 	if h.Pool == nil {
-		writeJSON(w, 500, map[string]interface{}{"error": "DATABASE_URL not set"})
-		return
+		renderPage(w, http.StatusServiceUnavailable, page{Title: "Unavailable", Message: "The service is temporarily unavailable."})
+		return nil
 	}
 	code := chi.URLParam(r, "code")
-	if reserved[strings.ToLower(code)] {
-		writeJSON(w, 404, map[string]interface{}{"error": "Not found"})
-		return
+	if IsReserved(code) {
+		renderPage(w, http.StatusNotFound, page{Title: "Link not found", Message: "This short link doesn't exist."})
+		return nil
 	}
 	cands, err := ListRedirectCandidates(r.Context(), h.Pool, code)
 	if err != nil || len(cands) == 0 {
-		writeJSON(w, 404, map[string]interface{}{"error": "Short code not found"})
-		return
+		renderPage(w, http.StatusNotFound, page{Title: "Link not found", Message: "This short link doesn't exist."})
+		return nil
 	}
 	now := time.Now()
-	var chosen *Link
 	for _, c := range cands {
 		if c.IsActive && !IsExpired(c.ExpiresAt, now) {
-			chosen = c
-			break
+			return c
 		}
 	}
-	if chosen == nil {
-		fb := cands[0]
-		if !fb.IsActive {
-			writeJSON(w, 410, map[string]interface{}{"error": "This link is inactive"})
-			return
-		}
-		if IsExpired(fb.ExpiresAt, now) {
-			writeJSON(w, 410, map[string]interface{}{"error": "This link has expired"})
-			return
-		}
-		writeJSON(w, 404, map[string]interface{}{"error": "Short code not found"})
+	if fb := cands[0]; !fb.IsActive {
+		renderPage(w, http.StatusGone, page{Title: "Link inactive", Message: "The owner has turned this link off."})
+	} else {
+		renderPage(w, http.StatusGone, page{Title: "Link expired", Message: "This short link has expired."})
+	}
+	return nil
+}
+
+func (h *Handler) follow(w http.ResponseWriter, r *http.Request, l *Link) {
+	if err := RecordClick(r.Context(), h.Pool, l.ID, r.Referer(), r.UserAgent(), h.creatorHash(r)); err != nil {
+		log.Printf("[WARN] record click: %v", err)
+	}
+	http.Redirect(w, r, l.Original, http.StatusFound)
+}
+
+// Redirect sends visitors to the destination, or shows the unlock form for
+// password-protected links.
+func (h *Handler) Redirect(w http.ResponseWriter, r *http.Request) {
+	l := h.resolve(w, r)
+	if l == nil {
 		return
 	}
-	// record click async? do sync for now
-	_ = RecordClick(r.Context(), h.Pool, chosen.ID, r.Referer(), r.UserAgent(), HashIP(h.Cfg.AppSecret, clientIP(r)))
-	http.Redirect(w, r, chosen.Original, http.StatusFound)
+	if l.HasPassword {
+		renderPage(w, http.StatusOK, page{Title: "Protected link", Message: "Enter the password to continue.", Form: true})
+		return
+	}
+	h.follow(w, r, l)
+}
+
+// Unlock handles the password form POSTed to /{code}.
+func (h *Handler) Unlock(w http.ResponseWriter, r *http.Request) {
+	l := h.resolve(w, r)
+	if l == nil {
+		return
+	}
+	if !l.HasPassword {
+		h.follow(w, r, l)
+		return
+	}
+	if !auth.VerifyPassword(r.PostFormValue("password"), l.passwordHash) {
+		renderPage(w, http.StatusUnauthorized, page{Title: "Protected link", Message: "Enter the password to continue.", Form: true, Error: "Incorrect password"})
+		return
+	}
+	// 303 so the browser follows with GET and doesn't resubmit the form.
+	if err := RecordClick(r.Context(), h.Pool, l.ID, r.Referer(), r.UserAgent(), h.creatorHash(r)); err != nil {
+		log.Printf("[WARN] record click: %v", err)
+	}
+	http.Redirect(w, r, l.Original, http.StatusSeeOther)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v interface{}) {
@@ -262,21 +274,12 @@ func writeJSON(w http.ResponseWriter, code int, v interface{}) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func clientIP(r *http.Request) string {
-	// trust proxy 1: X-Forwarded-For first
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		if len(parts) > 0 {
-			return strings.TrimSpace(parts[0])
-		}
+func internalError(w http.ResponseWriter, op string, err error) {
+	log.Printf("[ERROR] %s: %v", op, err)
+	var connErr *pgconn.ConnectError
+	if errors.As(err, &connErr) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{"error": "Database unavailable — please try again later"})
+		return
 	}
-	if ip := r.Header.Get("X-Real-IP"); ip != "" {
-		return strings.TrimSpace(ip)
-	}
-	// RemoteAddr includes port
-	host := r.RemoteAddr
-	if idx := strings.LastIndex(host, ":"); idx != -1 {
-		return host[:idx]
-	}
-	return host
+	writeJSON(w, 500, map[string]interface{}{"error": "Internal server error"})
 }

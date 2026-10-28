@@ -1,17 +1,17 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log"
 	"net/http"
-	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 	"pendekin/config"
 	"pendekin/db"
-	"pendekin/link"
-	mw "pendekin/middleware"
+	"pendekin/server"
 )
 
 func main() {
@@ -22,59 +22,34 @@ func main() {
 		defer db.Close()
 		if err := db.EnsureSchema(pool); err != nil {
 			log.Printf("[ERROR] ensureSchema: %v", err)
-		} else {
-			log.Println("[schema] ready")
 		}
 	} else {
 		log.Println("[WARN] DATABASE_URL not set — running without DB (health only)")
 	}
 
-	r := chi.NewRouter()
-	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
-	r.Use(mw.CORS(cfg.CorsOrigins))
-
-	// Global timeout & body limit via handler
-	r.Use(func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			req.Body = http.MaxBytesReader(w, req.Body, 16*1024) // 16kb for public create
-			next.ServeHTTP(w, req)
-		})
-	})
-
-	lh := &link.Handler{Pool: pool, Cfg: cfg}
-
-	// Public API under /api prefix (handled explicitly, no strip middleware)
-	r.Route("/api", func(r chi.Router) {
-		r.Get("/health", lh.Health)
-		r.Get("/ready", lh.Ready)
-		// rate limit create
-		limiter := mw.NewLimiter(60*time.Second, 5) // 5/min per IP
-		r.With(limiter.Middleware).Post("/links", lh.CreateLink)
-		r.With(limiter.Middleware).Post("/shorten", lh.CreateLink)
-		r.Get("/links", lh.ListLinks)
-		r.Get("/links/{code}/stats", lh.LinkStats)
-	})
-
-	// Also mount without /api for direct health checks
-	r.Get("/health", lh.Health)
-	r.Get("/ready", lh.Ready)
-
-	// Redirect catch-all must be last (single segment)
-	r.Get("/{code}", lh.Redirect)
-
-	port := cfg.Port
-	if port == "" {
-		port = "5000"
+	srv := &http.Server{
+		Addr:              "0.0.0.0:" + cfg.Port,
+		Handler:           server.New(cfg, pool),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
-	// Allow PORT env to be set by Coolify/Docker
-	if envPort := os.Getenv("PORT"); envPort != "" {
-		port = envPort
-	}
-	addr := "0.0.0.0:" + port
-	log.Printf("Server listening on %s (baseURL=%s)", addr, cfg.AppBaseURL)
-	if err := http.ListenAndServe(addr, r); err != nil {
-		log.Fatal(err)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		log.Printf("Server listening on %s (baseURL=%s)", srv.Addr, cfg.AppBaseURL)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal(err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Println("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("[WARN] shutdown: %v", err)
 	}
 }

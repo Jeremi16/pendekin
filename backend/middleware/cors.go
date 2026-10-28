@@ -15,13 +15,18 @@ func CORS(allowedOrigins []string) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			if isAllowed(origin, allowedOrigins) {
+			// Session cookies are only shared with explicitly allowlisted origins;
+			// the unconfigured wildcard never allows credentials.
+			if len(allowedOrigins) == 0 {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+			} else if isAllowed(origin, allowedOrigins) {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Access-Control-Allow-Credentials", "true")
-				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 				w.Header().Set("Vary", "Origin")
 			}
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Expose-Headers", "X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After")
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(204)
 				return
@@ -32,12 +37,6 @@ func CORS(allowedOrigins []string) func(http.Handler) http.Handler {
 }
 
 func isAllowed(origin string, allowed []string) bool {
-	if len(allowed) == 0 {
-		// Default: allow all in public mode? keep permissive for shortener
-		// But for safety allow only if origin parses; public create should be allowed from any site
-		// For now allow all when no config
-		return true
-	}
 	u, err := url.Parse(origin)
 	if err != nil {
 		return false

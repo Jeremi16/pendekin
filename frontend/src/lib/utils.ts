@@ -62,3 +62,18 @@ export function loadRecent(): { short: string; original: string; createdAt: stri
     return [];
   }
 }
+
+// Mirrors the backend's NormalizeURL loosely: enough to decide whether the
+// typed text can become a short link, for the live preview only.
+export function plausibleUrl(input: string): boolean {
+  const t = input.trim();
+  if (!t || /^(javascript|data|file):/i.test(t)) return false;
+  const withProto = /^https?:\/\//i.test(t) ? t : `https://${t}`;
+  try {
+    const { hostname } = new URL(withProto);
+    const h = hostname.toLowerCase().replace(/\.$/, "");
+    return h.includes(".") || h.startsWith("[");
+  } catch {
+    return false;
+  }
+}

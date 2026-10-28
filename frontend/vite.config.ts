@@ -11,6 +11,10 @@ export default defineConfig({
         target: 'http://localhost:5000',
         changeOrigin: true,
       },
+      // Short-link redirects, same rule as nginx.conf
+      '^/[A-Za-z0-9_-]{4,32}$': {
+        target: 'http://localhost:5000',
+      },
     },
   },
 })

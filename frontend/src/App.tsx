@@ -1,13 +1,43 @@
-import { useEffect, useState } from "react";
-import { Clock3, Copy, ExternalLink, Link2, QrCode, Search, Zap } from "lucide-react";
-import { apiGet, apiPost } from "./lib/api";
+import { useCallback, useEffect, useState } from "react";
+import { BarChart3, Check, Copy, CornerDownRight, ExternalLink, Link2, LogIn, QrCode, Settings as SettingsIcon, Sparkles, X } from "lucide-react";
+import { apiGet, apiPost, loginRedirect, type Account } from "./lib/api";
 import { APP_BASE_URL, CORNER_STYLES, DEFAULT_SETTINGS, QR_STYLES } from "./lib/constants";
-import { formatApiError, loadRecent, saveRecent } from "./lib/utils";
+import { cn, formatApiError, loadRecent, plausibleUrl, saveRecent } from "./lib/utils";
 import useQrCode from "./hooks/useQrCode";
 import ColorPicker from "./components/ColorPicker";
 import Select from "./components/Select";
+import Checkbox from "./components/Checkbox";
+import ExpiryPicker from "./components/ExpiryPicker";
+import AccountMenu from "./components/AccountMenu";
+import Dashboard from "./pages/Dashboard";
+import Settings from "./pages/Settings";
+import { btnPrimary, field, label } from "./lib/ui";
 
 type Recent = { short: string; original: string; createdAt: string };
+type Window = { limit: number; remaining: number; resetAt: string };
+type Quota = { tier: "anonymous" | "account"; minute: Window; day: Window };
+type Route = "home" | "dashboard" | "settings";
+type Toast = { type: "success" | "error"; text: string };
+
+function parseRoute(hash: string): Route {
+  if (hash.startsWith("#/dashboard")) return "dashboard";
+  if (hash.startsWith("#/settings")) return "settings";
+  return "home";
+}
+
+function go(route: Route) {
+  window.location.hash = route === "home" ? "#/" : `#/${route}`;
+}
+
+function secondsUntil(iso: string, now: number) {
+  return Math.max(0, Math.ceil((new Date(iso).getTime() - now) / 1000));
+}
+
+function formatWait(s: number) {
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.ceil(s / 60)}m`;
+  return `${Math.ceil(s / 3600)}h`;
+}
 
 export default function App() {
   const [url, setUrl] = useState("");
@@ -15,29 +45,80 @@ export default function App() {
   const [customSlug, setCustomSlug] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [panel, setPanel] = useState<"none" | "options" | "qr">("none");
   const [shortUrl, setShortUrl] = useState("");
-  const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [copied, setCopied] = useState("");
-  const [recent, setRecent] = useState<Recent[]>([]);
+  const [recent, setRecent] = useState<Recent[]>(loadRecent);
+  const [quota, setQuota] = useState<Quota | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  const [statsOpen, setStatsOpen] = useState(false);
   const [statsQuery, setStatsQuery] = useState("");
   const [statsData, setStatsData] = useState<any>(null);
-  const [statsLoading, setStatsLoading] = useState(false);
+  const [account, setAccount] = useState<Account | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [route, setRoute] = useState<Route>(() => parseRoute(window.location.hash));
+  const [toast, setToast] = useState<Toast | null>(null);
 
   const qr = useQrCode();
+  const qrPreview = useQrCode();
   const previewDomain = APP_BASE_URL.replace(/^https?:\/\//, "");
-  const slugPreview = customSlug.trim() ? `${APP_BASE_URL}/${customSlug.trim()}` : "";
-  const createData = shortUrl || slugPreview || url.trim();
 
-  useEffect(() => {
-    setRecent(loadRecent());
+  const refreshQuota = useCallback(async () => {
+    try {
+      setQuota(await apiGet<Quota>("/quota"));
+    } catch {
+      /* quota display is best-effort */
+    }
   }, []);
 
   useEffect(() => {
-    if (!message) return;
-    const t = setTimeout(() => setMessage(null), 3000);
+    refreshQuota();
+    apiGet<{ account: Account | null }>("/auth/me")
+      .then((d) => setAccount(d.account))
+      .catch(() => {})
+      .finally(() => setAuthChecked(true));
+  }, [refreshQuota]);
+
+  useEffect(() => {
+    const onHash = () => {
+      setRoute(parseRoute(window.location.hash));
+      window.scrollTo(0, 0);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3500);
     return () => clearTimeout(t);
-  }, [message]);
+  }, [toast]);
+  const showToast = useCallback((t: Toast) => setToast(t), []);
+
+  async function handleLogout() {
+    try {
+      await apiPost("/auth/logout", {});
+    } catch {
+      /* cookie is cleared server-side; ignore network errors */
+    }
+    setAccount(null);
+    go("home");
+    refreshQuota();
+  }
+
+  // Tick while a window is exhausted so the countdown updates and the quota refills.
+  const blocked = quota ? [quota.minute, quota.day].find((w) => w.remaining === 0) : undefined;
+  const wait = blocked ? secondsUntil(blocked.resetAt, now) : 0;
+  useEffect(() => {
+    if (!blocked) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [blocked]);
+  useEffect(() => {
+    if (blocked && wait === 0) refreshQuota();
+  }, [blocked, wait, refreshQuota]);
 
   useEffect(() => {
     if (!copied) return;
@@ -46,33 +127,43 @@ export default function App() {
   }, [copied]);
 
   useEffect(() => {
-    qr.render(createData, settings);
-  }, [createData, settings, qr]);
+    if (shortUrl) qr.render(shortUrl, settings);
+  }, [shortUrl, settings, qr]);
+
+  const qrPreviewData = plausibleUrl(url) ? url.trim() : `https://${previewDomain}`;
+  useEffect(() => {
+    if (panel === "qr") qrPreview.render(qrPreviewData, settings);
+  }, [panel, qrPreviewData, settings, qrPreview]);
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
-    if (!url.trim()) {
-      setMessage({ type: "error", text: "URL is required" });
-      return;
-    }
+    if (!url.trim() || submitting || blocked) return;
     setSubmitting(true);
+    setError("");
     try {
-      const data: any = await apiPost<{ shortURL: string; link: any }>("/links", {
+      const data = await apiPost<{ shortURL: string }>("/links", {
         url,
         title,
         customSlug,
-        expiresAt: expiresAt || null,
+        expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
         qrConfig: settings,
       });
       setShortUrl(data.shortURL);
-      setMessage({ type: "success", text: "Link created!" });
-      const rec = { short: data.shortURL, original: url, createdAt: new Date().toISOString() };
-      saveRecent(rec);
+      saveRecent({ short: data.shortURL, original: url, createdAt: new Date().toISOString() });
       setRecent(loadRecent());
+      setUrl("");
+      setTitle("");
+      setCustomSlug("");
+      setExpiresAt("");
+      setPanel("none");
     } catch (err: any) {
-      setMessage({ type: "error", text: formatApiError(err, "Failed to create link") });
+      setError(
+        err?.response?.status === 429 ? "Rate limit reached — please wait before shortening again." : formatApiError(err, "Failed to create link")
+      );
     } finally {
       setSubmitting(false);
+      setNow(Date.now());
+      refreshQuota();
     }
   }
 
@@ -80,168 +171,297 @@ export default function App() {
     try {
       await navigator.clipboard.writeText(text);
       setCopied(text);
-      setMessage({ type: "success", text: "Copied!" });
     } catch {
-      setMessage({ type: "error", text: "Copy failed" });
+      setError("Copy failed");
     }
   }
 
-  async function handleStats() {
-    const code = statsQuery.trim().split("/").filter(Boolean).pop() || statsQuery.trim();
+  async function handleStats(e: React.FormEvent) {
+    e.preventDefault();
+    const code = statsQuery.trim().split("/").filter(Boolean).pop();
     if (!code) return;
-    setStatsLoading(true);
     try {
-      const data: any = await apiGet(`/links/${code}/stats`);
+      const data = await apiGet<{ link: any }>(`/links/${code}/stats`);
       setStatsData(data.link);
     } catch (err: any) {
-      setMessage({ type: "error", text: formatApiError(err, "Not found") });
       setStatsData(null);
-    } finally {
-      setStatsLoading(false);
+      setError(formatApiError(err, "Not found — stats are only visible to the link's creator"));
     }
   }
 
   return (
-    <div className="min-h-screen relative overflow-hidden">
-      <div className="absolute inset-0 -z-10 bg-[radial-gradient(ellipse_70%_50%_at_15%_5%,rgba(99,102,241,0.14),transparent),radial-gradient(ellipse_50%_40%_at_85%_8%,rgba(245,158,11,0.1),transparent),linear-gradient(180deg,#f8faff_0%,#eef0fb_100%)]" />
-      {/* header */}
-      <header className="sticky top-0 z-40 backdrop-blur-xl bg-white/70 border-b border-slate-200/60">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-600 to-violet-500 flex items-center justify-center text-white shadow-lg">
-              <Link2 size={18} />
-            </div>
-            <div>
-              <p className="font-black tracking-tight leading-none">pendekin</p>
-              <p className="text-[11px] text-slate-500 -mt-0.5">URL shortener • QR generator • no login</p>
-            </div>
-          </div>
-          <a href="https://github.com" target="_blank" className="hidden sm:inline-flex items-center gap-2 text-xs font-semibold text-slate-600 hover:text-slate-900">
-            <ExternalLink size={14} /> Go + Vite + Bun
-          </a>
+    <div className="flex min-h-screen flex-col">
+      <header className="flex items-center justify-between px-5 py-4 sm:px-8">
+        <a href="#/" className="font-mono text-sm font-bold tracking-[0.35em] text-white">PENDEKIN</a>
+        <div className="flex items-center gap-2">
+          {account ? (
+            <AccountMenu account={account} onDashboard={() => go("dashboard")} onSettings={() => go("settings")} onLogout={handleLogout} />
+          ) : (
+            <>
+              <button
+                onClick={() => setStatsOpen((v) => !v)}
+                className="inline-flex items-center gap-1.5 rounded-full border border-neutral-800 px-3 py-1.5 text-xs text-neutral-400 transition hover:border-neutral-600 hover:text-white"
+              >
+                <BarChart3 size={13} /> Stats
+              </button>
+              <button
+                onClick={loginRedirect}
+                className="inline-flex items-center gap-1.5 rounded-full bg-white px-4 py-1.5 text-xs font-semibold text-black transition hover:bg-neutral-200"
+              >
+                <LogIn size={13} /> Log in
+              </button>
+            </>
+          )}
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 py-6 md:py-8 space-y-6">
-        {message && (
-          <div className={`flex items-center gap-2 rounded-2xl border px-4 py-3 text-sm ${message.type === "error" ? "bg-red-50 border-red-200 text-red-700" : "bg-emerald-50 border-emerald-200 text-emerald-700"}`}>
-            <Zap size={16} /> {message.text}
+      {route !== "home" ? (
+        <main className="flex-1 pt-2">
+          {!authChecked ? (
+            <p className="py-20 text-center text-sm text-neutral-500">Loading…</p>
+          ) : !account ? (
+            <div className="mx-auto max-w-sm px-4 py-20 text-center">
+              <p className={label}>Members only</p>
+              <h1 className="mt-2 text-2xl font-medium tracking-tight text-white">Log in to continue</h1>
+              <p className="mt-1 text-sm text-neutral-500">The dashboard lets you edit, pause, protect and track your links.</p>
+              <button onClick={loginRedirect} className={`${btnPrimary} mt-6`}><LogIn size={14} /> Log in</button>
+            </div>
+          ) : route === "dashboard" ? (
+            <Dashboard onToast={showToast} />
+          ) : (
+            <Settings account={account} onToast={showToast} onDeleted={() => { setAccount(null); go("home"); refreshQuota(); }} />
+          )}
+        </main>
+      ) : (
+      <main className="flex flex-1 flex-col items-center justify-center px-4 pb-16">
+        <div className="w-full max-w-2xl animate-fade-in">
+          <div className="mb-8 flex items-center justify-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-black">
+              <Link2 size={18} strokeWidth={2.5} />
+            </div>
+            <h1 className="text-3xl font-medium tracking-tight text-white">pendekin</h1>
           </div>
-        )}
 
-        {/* create */}
-        <div className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
-          <section className="rounded-3xl border border-white/80 bg-white/80 backdrop-blur shadow-xl p-5 md:p-7 space-y-5">
-            <div className="flex items-center gap-2 text-slate-900 font-bold">
-              <Link2 className="text-indigo-600" size={18} /> Create short link
-              <span className="ml-auto text-xs font-normal text-slate-500 flex items-center gap-1">
-                <Clock3 size={12} /> public • 5/min
-              </span>
-            </div>
-
-            <form onSubmit={handleCreate} className="space-y-4">
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold uppercase tracking-widest text-slate-400">Destination URL *</label>
-                <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com/very/long/url" className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100 outline-none" />
-              </div>
-
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold uppercase tracking-widest text-slate-400">Title (optional)</label>
-                  <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="My campaign" className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100 outline-none" />
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold uppercase tracking-widest text-slate-400">Custom slug (4-32)</label>
-                  <input value={customSlug} onChange={(e) => setCustomSlug(e.target.value)} placeholder="promo2026" className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100 outline-none" />
-                  {customSlug && <p className="text-xs text-slate-500 truncate">Preview: {slugPreview} <span className="text-slate-400">• domain: {previewDomain}</span></p>}
-                </div>
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold uppercase tracking-widest text-slate-400">Expiry (optional, max 90d)</label>
-                <input type="datetime-local" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100 outline-none" />
-              </div>
-
-              <div className="flex flex-wrap gap-2 pt-1">
-                <button disabled={submitting} className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-500/30 hover:bg-indigo-700 disabled:opacity-60">
-                  <Zap size={16} /> {submitting ? "Creating..." : "Shorten URL"}
-                </button>
-                {shortUrl && (
-                  <button type="button" onClick={() => handleCopy(shortUrl)} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-5 py-3 text-sm font-semibold shadow-sm">
-                    <Copy size={16} /> {copied === shortUrl ? "Copied!" : "Copy"} — {shortUrl}
-                  </button>
-                )}
-              </div>
-            </form>
-
-            {/* QR appearance */}
-            <div className="pt-4 border-t border-slate-100 space-y-3">
-              <p className="text-sm font-bold text-slate-900 flex items-center gap-2"><QrCode size={16} className="text-slate-500" /> QR appearance</p>
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                <ColorPicker label="Dots" color={settings.dotsColor} onChange={(v) => setSettings((s) => ({ ...s, dotsColor: v }))} />
-                <ColorPicker label="BG" color={settings.backgroundColor} onChange={(v) => setSettings((s) => ({ ...s, backgroundColor: v }))} />
-                <div><p className="text-xs font-semibold text-slate-500 mb-1">Dots</p><Select value={settings.dotsType} onChange={(v) => setSettings((s) => ({ ...s, dotsType: v }))} options={[...QR_STYLES]} /></div>
-                <div><p className="text-xs font-semibold text-slate-500 mb-1">Corners</p><Select value={settings.cornersType} onChange={(v) => setSettings((s) => ({ ...s, cornersType: v }))} options={[...CORNER_STYLES]} /></div>
-              </div>
-              <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" checked={settings.gradient} onChange={(e) => setSettings((s) => ({ ...s, gradient: e.target.checked }))} /> Gradient
-                {settings.gradient && <ColorPicker label="Grad 2" color={settings.gradientColor2} onChange={(v) => setSettings((s) => ({ ...s, gradientColor2: v }))} />}
-              </label>
-            </div>
-
-            {/* stats lookup */}
-            <div className="pt-4 border-t border-slate-100 space-y-3">
-              <p className="text-sm font-bold">Check stats</p>
-              <div className="flex gap-2">
-                <div className="flex-1 flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
-                  <Search size={14} className="text-slate-400" />
-                  <input value={statsQuery} onChange={(e) => setStatsQuery(e.target.value)} placeholder="paste short URL or code e.g. abc123" className="w-full bg-transparent text-sm outline-none" />
-                </div>
-                <button onClick={handleStats} disabled={statsLoading} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold shadow-sm disabled:opacity-50">
-                  {statsLoading ? "..." : "View"}
-                </button>
-              </div>
-              {statsData && (
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 text-sm space-y-1">
-                  <p className="font-bold">{statsData.title || statsData.shortCode} — {statsData.short}</p>
-                  <p className="text-slate-600 truncate">→ {statsData.original}</p>
-                  <p>Clicks: <b>{statsData.clickCount}</b> • {statsData.isActive ? "Active" : "Inactive"} {statsData.expiresAt ? `• expires ${new Date(statsData.expiresAt).toLocaleString()}` : ""}</p>
-                  <p className="text-xs text-slate-500">Created {new Date(statsData.createdAt).toLocaleString()}</p>
-                </div>
-              )}
-            </div>
-          </section>
-
-          {/* QR preview */}
-          <section className="rounded-3xl border border-white/80 bg-white/80 backdrop-blur shadow-xl p-5 md:p-7 space-y-4">
-            <p className="text-xs font-bold uppercase tracking-widest text-slate-400">QR Preview</p>
-            <div ref={qr.qrRef} className="flex min-h-[320px] items-center justify-center rounded-2xl border border-slate-100 bg-gradient-to-br from-slate-50 to-white p-4" />
-            <div className="flex flex-wrap gap-2">
-              <button onClick={() => qr.download("png", createData)} className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white">Download PNG</button>
-              <button onClick={() => qr.download("svg", createData)} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold">SVG</button>
-              {shortUrl && <button onClick={() => handleCopy(shortUrl)} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm"><Copy size={14} className="inline mr-1" /> Copy link</button>}
-            </div>
-            <p className="text-xs text-slate-500">Data: <span className="font-mono break-all">{createData || "—"}</span></p>
-
-            {recent.length > 0 && (
-              <div className="pt-4 border-t border-slate-100 space-y-2">
-                <p className="text-sm font-bold">Recent (this browser)</p>
-                <div className="space-y-2 max-h-[220px] overflow-auto pr-1">
-                  {recent.map((r) => (
-                    <div key={r.short} className="flex items-center gap-2 rounded-xl border border-slate-100 bg-white px-3 py-2 text-sm">
-                      <p className="truncate flex-1"><span className="font-semibold text-indigo-600">{r.short}</span> <span className="text-slate-500">→ {r.original}</span></p>
-                      <button onClick={() => handleCopy(r.short)} className="shrink-0 rounded-lg border px-2 py-1 text-xs"><Copy size={12} /></button>
-                    </div>
-                  ))}
-                </div>
-                <button onClick={() => { localStorage.removeItem("pendekin_recent"); setRecent([]); }} className="text-xs text-slate-500 hover:text-slate-700">Clear recent</button>
+          {/* Composer */}
+          <form onSubmit={handleCreate} className="rounded-[26px] border border-neutral-800 bg-neutral-900/70 p-3 shadow-2xl shadow-black/40 transition focus-within:border-neutral-700">
+            <input
+              autoFocus
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="Paste a long link to shorten…"
+              className="w-full bg-transparent px-2 pb-3 pt-1 text-[15px] text-white placeholder:text-neutral-500 outline-none"
+            />
+            {plausibleUrl(url) && (
+              <div
+                className="flex animate-fade-in items-center gap-1.5 px-2 pb-2"
+                title={customSlug.trim() ? `${previewDomain}/${customSlug.trim()}` : "The short code is generated once you shorten"}
+              >
+                <CornerDownRight size={13} className="shrink-0 text-neutral-600" />
+                <p className="min-w-0 truncate font-mono text-[12.5px] text-neutral-400">
+                  <span className="text-neutral-500">{previewDomain}</span>/
+                  {customSlug.trim() ? (
+                    <span className="text-neutral-100">{customSlug.trim()}</span>
+                  ) : (
+                    <span className="tracking-[0.25em] text-neutral-600">·······</span>
+                  )}
+                </p>
               </div>
             )}
-          </section>
-        </div>
+            <div className="flex items-center gap-1">
+              <IconToggle active={panel === "options"} onClick={() => setPanel(panel === "options" ? "none" : "options")} title="Options">
+                <SettingsIcon size={16} />
+              </IconToggle>
+              <IconToggle active={panel === "qr"} onClick={() => setPanel(panel === "qr" ? "none" : "qr")} title="QR style">
+                <QrCode size={16} />
+              </IconToggle>
 
-        <footer className="text-center text-xs text-slate-500 py-4">pendekin • Go + Vite + Bun + Tailwind • public shortener • no login • <a className="underline" href="/health" target="_blank">health</a> • <a className="underline" href="/api/health" target="_blank">api health</a></footer>
+              <div className="ml-auto flex items-center gap-3">
+                {quota && <QuotaBadge quota={quota} wait={wait} />}
+                <button
+                  disabled={!url.trim() || submitting || !!blocked}
+                  aria-label="Shorten"
+                  className="flex h-9 items-center gap-1.5 rounded-full bg-white px-4 text-[13px] font-semibold text-black transition hover:bg-neutral-200 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-400"
+                >
+                  {submitting ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-neutral-400 border-t-black" /> : <Link2 size={14} strokeWidth={2.5} />}
+                  Shorten
+                </button>
+              </div>
+            </div>
+
+            {panel === "options" && (
+              <div className="mt-3 grid gap-3 border-t border-neutral-800 px-1 pt-4 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <p className={label}>Custom slug</p>
+                  <input value={customSlug} onChange={(e) => setCustomSlug(e.target.value)} placeholder="promo2026" className={field} />
+                </div>
+                <div className="space-y-1.5">
+                  <p className={label}>Title</p>
+                  <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="My campaign" className={field} />
+                </div>
+                <div className="space-y-1.5 sm:col-span-2">
+                  <p className={label}>Expires (max 90 days)</p>
+                  <ExpiryPicker value={expiresAt} onChange={setExpiresAt} />
+                </div>
+              </div>
+            )}
+
+            {panel === "qr" && (
+              <div className="mt-3 flex flex-col gap-4 border-t border-neutral-800 px-1 pt-4 sm:flex-row sm:gap-5">
+                <div className="flex shrink-0 flex-col items-center gap-1.5 sm:w-32">
+                  <div ref={qrPreview.qrRef} className="w-28 overflow-hidden rounded-2xl border border-neutral-800 [&>canvas]:h-auto [&>canvas]:w-full [&>svg]:h-auto [&>svg]:w-full" />
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.15em] text-neutral-600">Live preview</p>
+                </div>
+                <div className="grid flex-1 gap-3 sm:grid-cols-2">
+                  <ColorPicker label="Dots" color={settings.dotsColor} onChange={(v) => setSettings((s) => ({ ...s, dotsColor: v }))} />
+                  <ColorPicker label="Background" color={settings.backgroundColor} onChange={(v) => setSettings((s) => ({ ...s, backgroundColor: v }))} />
+                  <div className="space-y-1.5">
+                    <p className={label}>Dots style</p>
+                    <Select value={settings.dotsType} onChange={(v) => setSettings((s) => ({ ...s, dotsType: v }))} options={[...QR_STYLES]} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <p className={label}>Corners</p>
+                    <Select value={settings.cornersType} onChange={(v) => setSettings((s) => ({ ...s, cornersType: v }))} options={[...CORNER_STYLES]} />
+                  </div>
+                  <div className="flex items-center gap-3 sm:col-span-2">
+                    <Checkbox label="Gradient" checked={settings.gradient} onChange={(v) => setSettings((s) => ({ ...s, gradient: v }))} />
+                    {settings.gradient && (
+                      <div className="min-w-0 flex-1">
+                        <ColorPicker label="Gradient to" color={settings.gradientColor2} onChange={(v) => setSettings((s) => ({ ...s, gradientColor2: v }))} />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </form>
+
+          {account && shortUrl && (
+            <p className="mt-2 px-2 text-xs text-neutral-500">
+              Saved to your account — manage it in the <a href="#/dashboard" className="text-neutral-300 underline-offset-2 hover:underline">dashboard</a>.
+            </p>
+          )}
+
+          {error && (
+            <div className="mt-3 flex items-start gap-2 rounded-2xl border border-red-900/60 bg-red-950/40 px-4 py-2.5 text-sm text-red-300">
+              <span className="flex-1">{error}</span>
+              <button onClick={() => setError("")} aria-label="Dismiss"><X size={14} /></button>
+            </div>
+          )}
+
+          {/* Result */}
+          {shortUrl && (
+            <div className="mt-4 flex flex-col gap-4 rounded-3xl border border-neutral-800 bg-neutral-900/40 p-4 sm:flex-row sm:items-center">
+              <div ref={qr.qrRef} className="mx-auto w-36 shrink-0 overflow-hidden rounded-2xl [&>canvas]:h-auto [&>canvas]:w-full [&>svg]:h-auto [&>svg]:w-full" />
+              <div className="min-w-0 flex-1 space-y-3">
+                <p className={label}>Your short link</p>
+                <a href={shortUrl} target="_blank" rel="noreferrer" className="block truncate text-lg font-medium text-white hover:underline">
+                  {shortUrl.replace(/^https?:\/\//, "")}
+                </a>
+                <div className="flex flex-wrap gap-2">
+                  <button onClick={() => handleCopy(shortUrl)} className="inline-flex items-center gap-1.5 rounded-full bg-white px-4 py-2 text-sm font-semibold text-black hover:bg-neutral-200">
+                    {copied === shortUrl ? <Check size={14} /> : <Copy size={14} />} {copied === shortUrl ? "Copied" : "Copy"}
+                  </button>
+                  <PillButton onClick={() => qr.download("png", shortUrl)}>PNG</PillButton>
+                  <PillButton onClick={() => qr.download("svg", shortUrl)}>SVG</PillButton>
+                  <a href={shortUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 rounded-full border border-neutral-800 px-4 py-2 text-sm text-neutral-300 hover:border-neutral-600 hover:text-white">
+                    <ExternalLink size={14} /> Open
+                  </a>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Stats lookup */}
+          {statsOpen && (
+            <form onSubmit={handleStats} className="mt-4 space-y-3 rounded-3xl border border-neutral-800 bg-neutral-900/40 p-4">
+              <p className={label}>Link stats</p>
+              <div className="flex gap-2">
+                <input value={statsQuery} onChange={(e) => setStatsQuery(e.target.value)} placeholder="Short URL or code" className={field} />
+                <button className="rounded-full bg-white px-5 text-sm font-semibold text-black hover:bg-neutral-200">View</button>
+              </div>
+              {statsData && (
+                <div className="space-y-1 px-2 text-sm text-neutral-400">
+                  <p className="font-medium text-white">{statsData.title || statsData.shortCode}</p>
+                  <p className="truncate">→ {statsData.original}</p>
+                  <p>
+                    <span className="text-white">{statsData.clickCount}</span> clicks · {statsData.isActive ? "active" : "inactive"}
+                    {statsData.expiresAt && ` · expires ${new Date(statsData.expiresAt).toLocaleString()}`}
+                  </p>
+                </div>
+              )}
+            </form>
+          )}
+
+          {/* Recent */}
+          {recent.length > 0 && (
+            <div className="mt-8 px-2">
+              <div className="mb-2 flex items-center justify-between">
+                <p className="flex items-center gap-1.5 text-xs text-neutral-500"><Sparkles size={12} /> Recent</p>
+                <button onClick={() => { localStorage.removeItem("pendekin_recent"); setRecent([]); }} className="text-xs text-neutral-600 hover:text-neutral-300">Clear</button>
+              </div>
+              <ul className="divide-y divide-neutral-900">
+                {recent.slice(0, 5).map((r) => (
+                  <li key={r.short} className="group flex items-center gap-3 py-2.5">
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium text-neutral-200">{r.short.replace(/^https?:\/\//, "")}</p>
+                      <p className="truncate text-xs text-neutral-500">{r.original}</p>
+                    </div>
+                    <button onClick={() => handleCopy(r.short)} aria-label="Copy" className="rounded-full p-2 text-neutral-500 transition hover:bg-neutral-900 hover:text-white">
+                      {copied === r.short ? <Check size={14} /> : <Copy size={14} />}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
       </main>
+      )}
+
+      {toast && (
+        <div role="status" className={`fixed bottom-6 left-1/2 z-[70] -translate-x-1/2 rounded-full border px-5 py-2.5 text-sm shadow-2xl shadow-black animate-fade-in ${toast.type === "error" ? "border-red-900/70 bg-red-950 text-red-200" : "border-neutral-700 bg-neutral-900 text-white"}`}>
+          {toast.text}
+        </div>
+      )}
+
+      <footer className="flex justify-center gap-6 pb-6 text-[10px] font-semibold uppercase tracking-[0.2em] text-neutral-600">
+        <span>No login required</span>
+        <a href="/api/health" target="_blank" className="hover:text-neutral-300">Status</a>
+      </footer>
     </div>
+  );
+}
+
+function IconToggle({ active, children, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { active: boolean }) {
+  return (
+    <button
+      type="button"
+      {...props}
+      className={cn(
+        "flex h-9 w-9 items-center justify-center rounded-full transition",
+        active ? "bg-neutral-800 text-white" : "text-neutral-400 hover:bg-neutral-800/60 hover:text-white"
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function PillButton(props: React.ButtonHTMLAttributes<HTMLButtonElement>) {
+  return <button type="button" {...props} className="rounded-full border border-neutral-800 px-4 py-2 text-sm text-neutral-300 hover:border-neutral-600 hover:text-white" />;
+}
+
+function QuotaBadge({ quota, wait }: { quota: Quota; wait: number }) {
+  const { minute, day } = quota;
+  if (wait > 0) {
+    return <span className="text-xs text-amber-400">Limit reached · {formatWait(wait)}</span>;
+  }
+  return (
+    <span
+      className="hidden font-mono text-[11px] text-neutral-500 sm:inline"
+      title={`${minute.remaining}/${minute.limit} per minute · ${day.remaining}/${day.limit} per day`}
+    >
+      {minute.remaining}/{minute.limit} min · {day.remaining}/{day.limit} day
+    </span>
   );
 }

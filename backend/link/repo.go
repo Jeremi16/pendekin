@@ -3,8 +3,11 @@ package link
 import (
 	"context"
 	"encoding/json"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -21,39 +24,70 @@ type Link struct {
 	LastClickedAt *time.Time             `json:"lastClickedAt"`
 	QrConfig      map[string]interface{} `json:"qrConfig"`
 	CreatedAt     time.Time              `json:"createdAt"`
+	UpdatedAt     *time.Time             `json:"updatedAt"`
+	HasPassword   bool                   `json:"hasPassword"`
 	Timestamp     string                 `json:"timestamp"`
+
+	passwordHash string
 }
 
-func mapRow(id int64, title *string, originalURL, shortURL string, shortCode, customSlug *string, isActive bool, expiresAt *time.Time, clickCount int, lastClickedAt *time.Time, qrConfig []byte, createdAt time.Time) *Link {
-	var qc map[string]interface{}
-	if len(qrConfig) > 0 {
-		_ = json.Unmarshal(qrConfig, &qc)
+const linkColumns = `id, title, original_url, short_url, short_code, custom_slug, is_active, expires_at, click_count, last_clicked_at, qr_config, created_at, password_hash, updated_at`
+
+func scanLink(row pgx.Row) (*Link, error) {
+	var l Link
+	var sc *string
+	var qr []byte
+	var pw *string
+	if err := row.Scan(&l.ID, &l.Title, &l.Original, &l.Short, &sc, &l.CustomSlug, &l.IsActive, &l.ExpiresAt, &l.ClickCount, &l.LastClickedAt, &qr, &l.CreatedAt, &pw, &l.UpdatedAt); err != nil {
+		return nil, err
 	}
-	if qc == nil {
-		qc = map[string]interface{}{}
+	if pw != nil && *pw != "" {
+		l.passwordHash = *pw
+		l.HasPassword = true
 	}
-	var sc string
-	if shortCode != nil {
-		sc = *shortCode
+	if sc != nil {
+		l.ShortCode = *sc
 	}
-	return &Link{
-		ID:            id,
-		Title:         title,
-		Original:      originalURL,
-		Short:         shortURL,
-		ShortCode:     sc,
-		CustomSlug:    customSlug,
-		IsActive:      isActive,
-		ExpiresAt:     expiresAt,
-		ClickCount:    clickCount,
-		LastClickedAt: lastClickedAt,
-		QrConfig:      qc,
-		CreatedAt:     createdAt,
-		Timestamp:     createdAt.Local().Format("2006-01-02 15:04:05"),
+	if len(qr) > 0 {
+		_ = json.Unmarshal(qr, &l.QrConfig)
 	}
+	if l.QrConfig == nil {
+		l.QrConfig = map[string]interface{}{}
+	}
+	l.Timestamp = l.CreatedAt.Local().Format("2006-01-02 15:04:05")
+	return &l, nil
 }
 
-func CreateLink(ctx context.Context, pool *pgxpool.Pool, title *string, originalURL, shortURL, shortCode string, customSlug *string, expiresAt *time.Time, qrConfig map[string]interface{}, ipHash string) (*Link, error) {
+func scanLinks(rows pgx.Rows) ([]*Link, error) {
+	defer rows.Close()
+	var out []*Link
+	for rows.Next() {
+		l, err := scanLink(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+// Scope identifies whose links a query may see: a logged-in owner, or else the
+// anonymous creator's IP hash.
+type Scope struct {
+	OwnerID     *int64
+	CreatorHash string
+}
+
+// clause returns the WHERE fragment and its single argument (bound as $n).
+func (s Scope) clause(n int) (string, interface{}) {
+	if s.OwnerID != nil {
+		return "owner_id = $" + strconv.Itoa(n), *s.OwnerID
+	}
+	// Links owned by an account are never visible through the anonymous IP scope.
+	return "creator_ip_hash = $" + strconv.Itoa(n) + " AND owner_id IS NULL", s.CreatorHash
+}
+
+func CreateLink(ctx context.Context, pool *pgxpool.Pool, title *string, originalURL, shortURL, shortCode string, customSlug *string, expiresAt *time.Time, qrConfig map[string]interface{}, ipHash string, ownerID *int64) (*Link, error) {
 	qc, _ := json.Marshal(qrConfig)
 	var cs *string
 	if customSlug != nil && *customSlug != "" {
@@ -63,68 +97,25 @@ func CreateLink(ctx context.Context, pool *pgxpool.Pool, title *string, original
 	if shortCode != "" {
 		sc = &shortCode
 	}
-	row := pool.QueryRow(ctx,
-		`INSERT INTO links (title, original_url, short_url, short_code, custom_slug, expires_at, qr_config, creator_ip_hash)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8) RETURNING id, title, original_url, short_url, short_code, custom_slug, is_active, expires_at, click_count, last_clicked_at, qr_config, created_at`,
-		title, originalURL, shortURL, sc, cs, expiresAt, string(qc), ipHash,
-	)
-	var l Link
-	var qr []byte
-	var t *string
-	var cs2 *string
-	var sc2 *string
-	var la *time.Time
-	err := row.Scan(&l.ID, &t, &l.Original, &l.Short, &sc2, &cs2, &l.IsActive, &l.ExpiresAt, &l.ClickCount, &la, &qr, &l.CreatedAt)
-	if err != nil {
-		return nil, err
-	}
-	l.Title = t
-	l.CustomSlug = cs2
-	if sc2 != nil {
-		l.ShortCode = *sc2
-	}
-	l.LastClickedAt = la
-	if len(qr) > 0 {
-		_ = json.Unmarshal(qr, &l.QrConfig)
-	}
-	if l.QrConfig == nil {
-		l.QrConfig = map[string]interface{}{}
-	}
-	l.Timestamp = l.CreatedAt.Local().Format("2006-01-02 15:04:05")
-	return &l, nil
+	return scanLink(pool.QueryRow(ctx,
+		`INSERT INTO links (title, original_url, short_url, short_code, custom_slug, expires_at, qr_config, creator_ip_hash, owner_id)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9) RETURNING `+linkColumns,
+		title, originalURL, shortURL, sc, cs, expiresAt, string(qc), ipHash, ownerID,
+	))
 }
 
 func GetLinkByCode(ctx context.Context, pool *pgxpool.Pool, code string) (*Link, error) {
-	row := pool.QueryRow(ctx,
-		`SELECT id, title, original_url, short_url, short_code, custom_slug, is_active, expires_at, click_count, last_clicked_at, qr_config, created_at
-		 FROM links WHERE short_code=$1 LIMIT 1`, code)
-	var l Link
-	var t *string
-	var cs *string
-	var sc *string
-	var qr []byte
-	var la *time.Time
-	err := row.Scan(&l.ID, &t, &l.Original, &l.Short, &sc, &cs, &l.IsActive, &l.ExpiresAt, &l.ClickCount, &la, &qr, &l.CreatedAt)
-	if err != nil {
-		return nil, err
-	}
-	l.Title = t
-	l.CustomSlug = cs
-	if sc != nil {
-		l.ShortCode = *sc
-	}
-	l.LastClickedAt = la
-	if len(qr) > 0 {
-		_ = json.Unmarshal(qr, &l.QrConfig)
-	}
-	if l.QrConfig == nil {
-		l.QrConfig = map[string]interface{}{}
-	}
-	l.Timestamp = l.CreatedAt.Local().Format("2006-01-02 15:04:05")
-	return &l, nil
+	return scanLink(pool.QueryRow(ctx, `SELECT `+linkColumns+` FROM links WHERE short_code=$1 LIMIT 1`, code))
 }
 
-func ListLinks(ctx context.Context, pool *pgxpool.Pool, search, status string, page, limit int) ([]*Link, int, error) {
+// GetScopedLinkByCode returns the link only if it is visible to scope.
+func GetScopedLinkByCode(ctx context.Context, pool *pgxpool.Pool, code string, scope Scope) (*Link, error) {
+	cond, arg := scope.clause(2)
+	return scanLink(pool.QueryRow(ctx, `SELECT `+linkColumns+` FROM links WHERE short_code=$1 AND `+cond+` LIMIT 1`, code, arg))
+}
+
+// ListLinks lists links visible to scope.
+func ListLinks(ctx context.Context, pool *pgxpool.Pool, scope Scope, search, status, sort string, page, limit int) ([]*Link, int, error) {
 	if limit <= 0 || limit > 50 {
 		limit = DefaultPageSize
 	}
@@ -133,153 +124,66 @@ func ListLinks(ctx context.Context, pool *pgxpool.Pool, search, status string, p
 	}
 	offset := (page - 1) * limit
 
-	// Build WHERE
-	where := "WHERE 1=1"
-	args := []interface{}{}
-	idx := 1
+	cond, arg := scope.clause(1)
+	where := "WHERE " + cond
+	args := []interface{}{arg}
 
-	if status == "active" {
+	switch status {
+	case "active":
 		where += " AND is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW())"
-	} else if status == "inactive" {
+	case "inactive":
 		where += " AND is_active = FALSE"
-	} else if status == "expired" {
+	case "expired":
 		where += " AND expires_at IS NOT NULL AND expires_at <= NOW()"
 	}
 	if search != "" {
-		where += " AND (LOWER(COALESCE(title,'')) LIKE $" + itoa(idx) + " OR LOWER(original_url) LIKE $" + itoa(idx) + " OR LOWER(short_url) LIKE $" + itoa(idx) + " OR LOWER(COALESCE(short_code,'')) LIKE $" + itoa(idx) + ")"
-		args = append(args, "%"+lower(search)+"%")
-		idx++
+		args = append(args, "%"+strings.ToLower(search)+"%")
+		p := "$" + strconv.Itoa(len(args))
+		where += " AND (LOWER(COALESCE(title,'')) LIKE " + p + " OR LOWER(original_url) LIKE " + p + " OR LOWER(short_url) LIKE " + p + " OR LOWER(COALESCE(short_code,'')) LIKE " + p + ")"
 	}
 
-	// Count
 	var total int
-	countSQL := "SELECT COUNT(*) FROM links " + where
-	if err := pool.QueryRow(ctx, countSQL, args...).Scan(&total); err != nil {
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM links "+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
-	// List
-	listSQL := "SELECT id, title, original_url, short_url, short_code, custom_slug, is_active, expires_at, click_count, last_clicked_at, qr_config, created_at FROM links " + where + " ORDER BY created_at DESC LIMIT $" + itoa(idx) + " OFFSET $" + itoa(idx+1)
-	args2 := append(append([]interface{}{}, args...), limit, offset)
-	rows, err := pool.Query(ctx, listSQL, args2...)
+	n := len(args)
+	listSQL := "SELECT " + linkColumns + " FROM links " + where + " ORDER BY " + orderBy(sort) + " LIMIT $" + strconv.Itoa(n+1) + " OFFSET $" + strconv.Itoa(n+2)
+	rows, err := pool.Query(ctx, listSQL, append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer rows.Close()
-	var out []*Link
-	for rows.Next() {
-		var l Link
-		var t *string
-		var cs *string
-		var sc *string
-		var qr []byte
-		var la *time.Time
-		if err := rows.Scan(&l.ID, &t, &l.Original, &l.Short, &sc, &cs, &l.IsActive, &l.ExpiresAt, &l.ClickCount, &la, &qr, &l.CreatedAt); err != nil {
-			continue
-		}
-		l.Title = t
-		l.CustomSlug = cs
-		if sc != nil {
-			l.ShortCode = *sc
-		}
-		l.LastClickedAt = la
-		if len(qr) > 0 {
-			_ = json.Unmarshal(qr, &l.QrConfig)
-		}
-		if l.QrConfig == nil {
-			l.QrConfig = map[string]interface{}{}
-		}
-		l.Timestamp = l.CreatedAt.Local().Format("2006-01-02 15:04:05")
-		out = append(out, &l)
+	out, err := scanLinks(rows)
+	if err != nil {
+		return nil, 0, err
 	}
 	return out, total, nil
 }
 
+// orderBy maps a whitelisted sort key to SQL (never interpolate user input).
+func orderBy(sort string) string {
+	switch sort {
+	case "clicks":
+		return "click_count DESC, created_at DESC"
+	case "oldest":
+		return "created_at ASC"
+	default:
+		return "created_at DESC"
+	}
+}
+
 func RecordClick(ctx context.Context, pool *pgxpool.Pool, linkID int64, referrer, userAgent, ipHash string) error {
+	device, browser := ParseUserAgent(userAgent)
 	_, err := pool.Exec(ctx,
-		`WITH inserted AS (INSERT INTO click_events (link_id, referrer, user_agent, ip_hash) VALUES ($1,$2,$3,$4))
-		 UPDATE links SET click_count = click_count + 1, last_clicked_at = NOW() WHERE id=$1`, linkID, referrer, userAgent, ipHash)
+		`WITH inserted AS (INSERT INTO click_events (link_id, referrer, user_agent, ip_hash, device, browser) VALUES ($1,$2,$3,$4,$5,$6))
+		 UPDATE links SET click_count = click_count + 1, last_clicked_at = NOW() WHERE id=$1`, linkID, referrer, userAgent, ipHash, device, browser)
 	return err
 }
 
 func ListRedirectCandidates(ctx context.Context, pool *pgxpool.Pool, code string) ([]*Link, error) {
-	rows, err := pool.Query(ctx,
-		`SELECT id, title, original_url, short_url, short_code, custom_slug, is_active, expires_at, click_count, last_clicked_at, qr_config, created_at
-		 FROM links WHERE short_code=$1 ORDER BY created_at DESC`, code)
+	rows, err := pool.Query(ctx, `SELECT `+linkColumns+` FROM links WHERE short_code=$1 ORDER BY created_at DESC`, code)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*Link
-	for rows.Next() {
-		var l Link
-		var t *string
-		var cs *string
-		var sc *string
-		var qr []byte
-		var la *time.Time
-		if err := rows.Scan(&l.ID, &t, &l.Original, &l.Short, &sc, &cs, &l.IsActive, &l.ExpiresAt, &l.ClickCount, &la, &qr, &l.CreatedAt); err != nil {
-			continue
-		}
-		l.Title = t
-		l.CustomSlug = cs
-		if sc != nil {
-			l.ShortCode = *sc
-		}
-		l.LastClickedAt = la
-		if len(qr) > 0 {
-			_ = json.Unmarshal(qr, &l.QrConfig)
-		}
-		if l.QrConfig == nil {
-			l.QrConfig = map[string]interface{}{}
-		}
-		l.Timestamp = l.CreatedAt.Local().Format("2006-01-02 15:04:05")
-		out = append(out, &l)
-	}
-	return out, nil
-}
-
-func lower(s string) string {
-	// avoid import strings in tight loop? use strings.ToLower
-	return stringsToLower(s)
-}
-
-func stringsToLower(s string) string {
-	// manual to avoid import cycle
-	out := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 32
-		}
-		out[i] = c
-	}
-	// handle unicode lower via stdlib fallback for non-ascii
-	// simple approach: use strings.ToLower for correctness
-	return string(out)
-}
-
-func itoa(i int) string {
-	return fmtItoa(i)
-}
-
-func fmtItoa(i int) string {
-	// avoid strconv import for tiny helper
-	if i == 0 {
-		return "0"
-	}
-	neg := false
-	if i < 0 {
-		neg = true
-		i = -i
-	}
-	buf := make([]byte, 0, 8)
-	for i > 0 {
-		buf = append([]byte{byte('0' + i%10)}, buf...)
-		i /= 10
-	}
-	if neg {
-		buf = append([]byte{'-'}, buf...)
-	}
-	return string(buf)
+	return scanLinks(rows)
 }
