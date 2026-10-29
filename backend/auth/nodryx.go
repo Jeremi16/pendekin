@@ -438,9 +438,42 @@ func (n *Nodryx) userinfo(ctx context.Context, accessToken string) (*nodryxUser,
 		}
 		return nil, fmt.Errorf("userinfo returned %d", res.StatusCode)
 	}
+	body, err := io.ReadAll(io.LimitReader(res.Body, 64<<10))
+	if err != nil {
+		return nil, fmt.Errorf("read userinfo: %w", err)
+	}
 	var u nodryxUser
-	if err := json.NewDecoder(io.LimitReader(res.Body, 64<<10)).Decode(&u); err != nil {
+	if err := json.Unmarshal(body, &u); err != nil {
 		return nil, fmt.Errorf("decode userinfo: %w", err)
+	}
+	if u.Name == "" {
+		// Nodryx may not send the standard "name" claim; fall back to the other
+		// common OIDC/profile claims before giving up.
+		var alt struct {
+			GivenName         string `json:"given_name"`
+			FamilyName        string `json:"family_name"`
+			PreferredUsername string `json:"preferred_username"`
+			Nickname          string `json:"nickname"`
+			Username          string `json:"username"`
+			FullName          string `json:"full_name"`
+			DisplayName       string `json:"display_name"`
+		}
+		_ = json.Unmarshal(body, &alt)
+		for _, c := range []string{alt.FullName, alt.DisplayName, strings.TrimSpace(alt.GivenName + " " + alt.FamilyName), alt.PreferredUsername, alt.Nickname, alt.Username} {
+			if c = strings.TrimSpace(c); c != "" {
+				u.Name = c
+				break
+			}
+		}
+	}
+	if u.Name == "" {
+		var claims map[string]json.RawMessage
+		_ = json.Unmarshal(body, &claims)
+		keys := make([]string, 0, len(claims))
+		for k := range claims {
+			keys = append(keys, k)
+		}
+		log.Printf("[INFO] nodryx userinfo has no name claim; keys: %v", keys)
 	}
 	return &u, nil
 }
