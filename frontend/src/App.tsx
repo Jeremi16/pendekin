@@ -11,7 +11,7 @@ import ExpiryPicker from "./components/ExpiryPicker";
 import AccountMenu from "./components/AccountMenu";
 import Dashboard from "./pages/Dashboard";
 import Settings from "./pages/Settings";
-import { btnPrimary, field, label } from "./lib/ui";
+import { btnPrimary, field, label, parseTags, withUtm } from "./lib/ui";
 
 type Recent = { short: string; original: string; createdAt: string };
 type Window = { limit: number; remaining: number; resetAt: string };
@@ -44,6 +44,9 @@ export default function App() {
   const [title, setTitle] = useState("");
   const [customSlug, setCustomSlug] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
+  const [maxClicks, setMaxClicks] = useState("");
+  const [tags, setTags] = useState("");
+  const [utm, setUtm] = useState({ source: "", medium: "", campaign: "" });
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [panel, setPanel] = useState<"none" | "options" | "qr">("none");
   const [shortUrl, setShortUrl] = useState("");
@@ -141,20 +144,26 @@ export default function App() {
     setSubmitting(true);
     setError("");
     try {
+      const dest = withUtm(url, utm);
       const data = await apiPost<{ shortURL: string }>("/links", {
-        url,
+        url: dest,
         title,
         customSlug,
         expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
         qrConfig: settings,
+        maxClicks: maxClicks ? Number(maxClicks) : null,
+        tags: parseTags(tags),
       });
       setShortUrl(data.shortURL);
-      saveRecent({ short: data.shortURL, original: url, createdAt: new Date().toISOString() });
+      saveRecent({ short: data.shortURL, original: dest, createdAt: new Date().toISOString() });
       setRecent(loadRecent());
       setUrl("");
       setTitle("");
       setCustomSlug("");
       setExpiresAt("");
+      setMaxClicks("");
+      setTags("");
+      setUtm({ source: "", medium: "", campaign: "" });
       setPanel("none");
     } catch (err: any) {
       setError(
@@ -301,6 +310,25 @@ export default function App() {
                 <div className="space-y-1.5 sm:col-span-2">
                   <p className={label}>Expires (max 90 days)</p>
                   <ExpiryPicker value={expiresAt} onChange={setExpiresAt} />
+                </div>
+                <div className="space-y-1.5">
+                  <p className={label}>Click limit</p>
+                  <input type="number" min={1} inputMode="numeric" value={maxClicks} onChange={(e) => setMaxClicks(e.target.value)} placeholder="Unlimited" className={field} />
+                </div>
+                <div className="space-y-1.5">
+                  <p className={label}>Tags</p>
+                  <input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="promo, instagram" className={field} />
+                </div>
+                <div className="space-y-1.5 sm:col-span-2">
+                  <p className={label}>UTM parameters</p>
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <input value={utm.source} onChange={(e) => setUtm((u) => ({ ...u, source: e.target.value }))} placeholder="source · instagram" aria-label="utm_source" className={field} />
+                    <input value={utm.medium} onChange={(e) => setUtm((u) => ({ ...u, medium: e.target.value }))} placeholder="medium · social" aria-label="utm_medium" className={field} />
+                    <input value={utm.campaign} onChange={(e) => setUtm((u) => ({ ...u, campaign: e.target.value }))} placeholder="campaign · promo" aria-label="utm_campaign" className={field} />
+                  </div>
+                  {plausibleUrl(url) && (utm.source || utm.medium || utm.campaign) && (
+                    <p className="truncate px-1 font-mono text-[11px] text-neutral-500" title={withUtm(url, utm)}>→ {withUtm(url, utm)}</p>
+                  )}
                 </div>
               </div>
             )}

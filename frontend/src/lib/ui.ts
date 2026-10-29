@@ -25,10 +25,34 @@ export type DashLink = {
   createdAt: string;
   updatedAt: string | null;
   hasPassword: boolean;
+  maxClicks: number | null;
+  tags: string[];
+  ogTitle: string | null;
+  ogDescription: string | null;
+  ogImage: string | null;
 };
 
 export type DayCount = { date: string; count: number };
 export type LabelCount = { label: string; count: number };
+
+// "a, b ,c" → ["a","b","c"]
+export function parseTags(s: string): string[] {
+  return s.split(",").map((t) => t.trim()).filter(Boolean);
+}
+
+// Adds UTM parameters to a URL, keeping any existing query string.
+export function withUtm(url: string, utm: { source: string; medium: string; campaign: string }): string {
+  const entries = Object.entries(utm).filter(([, v]) => v.trim());
+  if (!entries.length) return url;
+  const t = url.trim();
+  try {
+    const u = new URL(/^https?:\/\//i.test(t) ? t : `https://${t}`);
+    entries.forEach(([k, v]) => u.searchParams.set(`utm_${k}`, v.trim()));
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
 
 export function stripProto(u: string) {
   return u.replace(/^https?:\/\//, "");
@@ -42,8 +66,9 @@ export function toLocalInput(iso: string | null) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-export function linkStatus(l: DashLink): "active" | "inactive" | "expired" {
+export function linkStatus(l: DashLink): "active" | "inactive" | "expired" | "limit" {
   if (!l.isActive) return "inactive";
+  if (l.maxClicks !== null && l.clickCount >= l.maxClicks) return "limit";
   if (l.expiresAt && new Date(l.expiresAt).getTime() <= Date.now()) return "expired";
   return "active";
 }

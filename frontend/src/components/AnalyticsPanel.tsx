@@ -5,7 +5,20 @@ import { apiGet } from "../lib/api";
 import { formatApiError } from "../lib/utils";
 import { label, stripProto, type DashLink, type DayCount, type LabelCount } from "../lib/ui";
 
-type Analytics = { days: number; series: DayCount[]; referrers: LabelCount[]; devices: LabelCount[]; browsers: LabelCount[] };
+type Analytics = { days: number; series: DayCount[]; referrers: LabelCount[]; devices: LabelCount[]; browsers: LabelCount[]; countries: LabelCount[]; os: LabelCount[] };
+
+const regionNames = (() => {
+  try {
+    return new Intl.DisplayNames(undefined, { type: "region" });
+  } catch {
+    return null;
+  }
+})();
+
+function countryLabel(code: string) {
+  if (!code) return "Unknown";
+  return `${regionNames?.of(code) ?? code} (${code})`;
+}
 
 const RANGES = [7, 30, 90] as const;
 
@@ -60,6 +73,8 @@ export default function AnalyticsPanel({ link, onClose }: { link: DashLink; onCl
             <Breakdown title="Top referrers" rows={data.referrers} />
             <Breakdown title="Devices" rows={data.devices} />
             <Breakdown title="Browsers" rows={data.browsers} />
+            <Breakdown title="Operating systems" rows={data.os} />
+            <Breakdown title="Countries" rows={data.countries.map((c) => ({ ...c, label: countryLabel(c.label) }))} />
           </>
         )}
       </div>

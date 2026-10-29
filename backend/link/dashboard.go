@@ -38,7 +38,7 @@ func (h *Handler) DashLinks(w http.ResponseWriter, r *http.Request) {
 	page, _ := strconv.Atoi(q.Get("page"))
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	links, total, err := ListLinks(r.Context(), h.Pool, Scope{OwnerID: &owner},
-		strings.TrimSpace(q.Get("search")), NormalizeStatus(q.Get("status")), q.Get("sort"), page, limit)
+		strings.TrimSpace(q.Get("search")), NormalizeStatus(q.Get("status")), strings.ToLower(strings.TrimSpace(q.Get("tag"))), q.Get("sort"), page, limit)
 	if err != nil {
 		internalError(w, "dashboard list", err)
 		return
@@ -47,6 +47,18 @@ func (h *Handler) DashLinks(w http.ResponseWriter, r *http.Request) {
 		links = []*Link{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"links": links, "total": total})
+}
+
+func (h *Handler) DashTags(w http.ResponseWriter, r *http.Request) {
+	tags, err := ListTags(r.Context(), h.Pool, ownerID(r))
+	if err != nil {
+		internalError(w, "dashboard tags", err)
+		return
+	}
+	if tags == nil {
+		tags = []TagCount{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tags": tags})
 }
 
 type dayCount struct {
@@ -139,6 +151,10 @@ func (h *Handler) PatchLink(w http.ResponseWriter, r *http.Request) {
 				bad("A valid URL is required (no localhost/private IP)")
 				return
 			}
+			if h.isUnsafe(r, u) {
+				bad("This URL is flagged as unsafe (malware or phishing)")
+				return
+			}
 			set("original_url", u)
 		case "title":
 			var s string
@@ -190,6 +206,53 @@ func (h *Handler) PatchLink(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			set("password_hash", hash)
+		case "maxClicks":
+			var n *int
+			if json.Unmarshal(raw, &n) != nil {
+				bad("maxClicks must be a number or null")
+				return
+			}
+			n, errStr := NormalizeMaxClicks(n)
+			if errStr != "" {
+				bad(errStr)
+				return
+			}
+			set("max_clicks", n)
+		case "tags":
+			var in []string
+			if json.Unmarshal(raw, &in) != nil {
+				bad("tags must be an array of strings")
+				return
+			}
+			tags, errStr := NormalizeTags(in)
+			if errStr != "" {
+				bad(errStr)
+				return
+			}
+			set("tags", tags)
+		case "ogTitle", "ogDescription", "ogImage":
+			var s string
+			if !isNull(raw) && json.Unmarshal(raw, &s) != nil {
+				bad(key + " must be a string or null")
+				return
+			}
+			switch key {
+			case "ogTitle":
+				set("og_title", NormalizeText(s, 120))
+			case "ogDescription":
+				set("og_description", NormalizeText(s, 300))
+			case "ogImage":
+				if strings.TrimSpace(s) == "" {
+					set("og_image", nil)
+					continue
+				}
+				u, ok := NormalizeURL(s)
+				if !ok {
+					bad("OG image must be a valid public URL")
+					return
+				}
+				set("og_image", u)
+			}
 		case "qrConfig":
 			var m map[string]any
 			if json.Unmarshal(raw, &m) != nil {
@@ -328,7 +391,9 @@ func (h *Handler) LinkAnalytics(w http.ResponseWriter, r *http.Request) {
 	devices, err1 := group(`COALESCE(device, 'Unknown')`, 10)
 	browsers, err2 := group(`COALESCE(browser, 'Unknown')`, 10)
 	rawRefs, err3 := group(`COALESCE(referrer, '')`, 500)
-	if err := errors.Join(err1, err2, err3); err != nil {
+	countries, err4 := group(`COALESCE(country, '')`, 15)
+	oses, err5 := group(`COALESCE(os, 'Unknown')`, 10)
+	if err := errors.Join(err1, err2, err3, err4, err5); err != nil {
 		internalError(w, "analytics breakdown", err)
 		return
 	}
@@ -353,6 +418,7 @@ func (h *Handler) LinkAnalytics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"link": l, "days": days, "series": series,
 		"referrers": referrers, "devices": devices, "browsers": browsers,
+		"countries": countries, "os": oses,
 	})
 }
 

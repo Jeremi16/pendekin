@@ -134,7 +134,7 @@ func NormalizeQrConfig(input map[string]interface{}) map[string]interface{} {
 
 func NormalizeStatus(input string) string {
 	switch input {
-	case "active", "inactive", "expired":
+	case "active", "inactive", "expired", "limit":
 		return input
 	default:
 		return "all"
@@ -185,4 +185,58 @@ func IsExpired(expiresAt *time.Time, now time.Time) bool {
 		return false
 	}
 	return !expiresAt.After(now)
+}
+
+// MaxClicksLimit caps the configurable click limit per link.
+const MaxClicksLimit = 10_000_000
+
+// NormalizeMaxClicks validates a click limit; nil or 0 means "no limit".
+func NormalizeMaxClicks(n *int) (*int, string) {
+	if n == nil || *n == 0 {
+		return nil, ""
+	}
+	if *n < 1 || *n > MaxClicksLimit {
+		return nil, "Click limit must be between 1 and 10,000,000"
+	}
+	return n, ""
+}
+
+var tagRe = regexp.MustCompile(`^[\p{L}\p{N}][\p{L}\p{N} _-]{0,23}$`)
+
+// NormalizeTags lowercases, trims and de-duplicates tags (max 10, 1-24 chars each).
+func NormalizeTags(in []string) ([]string, string) {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, t := range in {
+		t = strings.ToLower(strings.Join(strings.Fields(t), " "))
+		if t == "" || seen[t] {
+			continue
+		}
+		if !tagRe.MatchString(t) {
+			return nil, "Tags must be 1-24 letters, numbers, spaces, - or _"
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
+	if len(out) > 10 {
+		return nil, "A link can have at most 10 tags"
+	}
+	return out, ""
+}
+
+// NormalizeText trims s and truncates it to max runes; "" becomes nil.
+func NormalizeText(s string, max int) *string {
+	t := strings.TrimSpace(s)
+	if t == "" {
+		return nil
+	}
+	if utf8.RuneCountInString(t) > max {
+		t = string([]rune(t)[:max])
+	}
+	return &t
+}
+
+// HasClicksLeft reports whether a click limit (if any) still allows visits.
+func HasClicksLeft(l *Link) bool {
+	return l.MaxClicks == nil || l.ClickCount < *l.MaxClicks
 }

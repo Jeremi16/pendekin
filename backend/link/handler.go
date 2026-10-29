@@ -66,7 +66,7 @@ func (h *Handler) ListLinks(w http.ResponseWriter, r *http.Request) {
 	status := NormalizeStatus(q.Get("status"))
 	page, _ := strconv.Atoi(q.Get("page"))
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	links, total, err := ListLinks(r.Context(), h.Pool, h.scope(r), search, status, "", page, limit)
+	links, total, err := ListLinks(r.Context(), h.Pool, h.scope(r), search, status, "", "", page, limit)
 	if err != nil {
 		internalError(w, "list links", err)
 		return
@@ -98,6 +98,27 @@ type createReq struct {
 	CustomSlug string                 `json:"customSlug"`
 	ExpiresAt  string                 `json:"expiresAt"`
 	QrConfig   map[string]interface{} `json:"qrConfig"`
+	MaxClicks  *int                   `json:"maxClicks"`
+	Tags       []string               `json:"tags"`
+}
+
+// isUnsafe checks the destination against Safe Browsing. Lookup failures fail
+// open (logged) so an outage of the checker doesn't block link creation.
+func (h *Handler) isUnsafe(r *http.Request, u string) bool {
+	bad, err := CheckSafeBrowsing(r.Context(), h.Cfg.SafeBrowsingKey, u)
+	if err != nil {
+		log.Printf("[WARN] safe browsing: %v", err)
+		return false
+	}
+	return bad
+}
+
+// visitorCountry is the edge-provided country, only when the proxy is trusted.
+func (h *Handler) visitorCountry(r *http.Request) string {
+	if !h.Cfg.TrustProxy {
+		return ""
+	}
+	return CountryFromHeaders(r.Header)
 }
 
 func (h *Handler) CreateLink(w http.ResponseWriter, r *http.Request) {
@@ -133,6 +154,20 @@ func (h *Handler) CreateLink(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	qr := NormalizeQrConfig(req.QrConfig)
+	maxClicks, errStr := NormalizeMaxClicks(req.MaxClicks)
+	if errStr != "" {
+		writeJSON(w, 400, map[string]interface{}{"error": errStr})
+		return
+	}
+	tags, errStr := NormalizeTags(req.Tags)
+	if errStr != "" {
+		writeJSON(w, 400, map[string]interface{}{"error": errStr})
+		return
+	}
+	if h.isUnsafe(r, normalized) {
+		writeJSON(w, 400, map[string]interface{}{"error": "This URL is flagged as unsafe (malware or phishing)"})
+		return
+	}
 
 	// Determine base URL: APP_BASE_URL or request host
 	proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])
@@ -179,7 +214,7 @@ func (h *Handler) CreateLink(w http.ResponseWriter, r *http.Request) {
 		customSlugPtr = &slug
 	}
 
-	lnk, err := CreateLink(r.Context(), h.Pool, title, normalized, baseURL+"/"+shortCode, shortCode, customSlugPtr, expiresAt, qr, h.creatorHash(r), ownerID)
+	lnk, err := CreateLink(r.Context(), h.Pool, title, normalized, baseURL+"/"+shortCode, shortCode, customSlugPtr, expiresAt, qr, h.creatorHash(r), ownerID, CreateExtras{MaxClicks: maxClicks, Tags: tags})
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -197,12 +232,11 @@ func (h *Handler) CreateLink(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolve picks the live link for a short code, or writes an error page.
-func (h *Handler) resolve(w http.ResponseWriter, r *http.Request) *Link {
+func (h *Handler) resolve(w http.ResponseWriter, r *http.Request, code string) *Link {
 	if h.Pool == nil {
 		renderPage(w, http.StatusServiceUnavailable, page{Title: "Unavailable", Message: "The service is temporarily unavailable."})
 		return nil
 	}
-	code := chi.URLParam(r, "code")
 	if IsReserved(code) {
 		renderPage(w, http.StatusNotFound, page{Title: "Link not found", Message: "This short link doesn't exist."})
 		return nil
@@ -214,57 +248,72 @@ func (h *Handler) resolve(w http.ResponseWriter, r *http.Request) *Link {
 	}
 	now := time.Now()
 	for _, c := range cands {
-		if c.IsActive && !IsExpired(c.ExpiresAt, now) {
+		if c.IsActive && !IsExpired(c.ExpiresAt, now) && HasClicksLeft(c) {
 			return c
 		}
 	}
-	if fb := cands[0]; !fb.IsActive {
+	switch fb := cands[0]; {
+	case !fb.IsActive:
 		renderPage(w, http.StatusGone, page{Title: "Link inactive", Message: "The owner has turned this link off."})
-	} else {
+	case !HasClicksLeft(fb):
+		renderPage(w, http.StatusGone, page{Title: "Link used up", Message: "This short link has reached its click limit."})
+	default:
 		renderPage(w, http.StatusGone, page{Title: "Link expired", Message: "This short link has expired."})
 	}
 	return nil
 }
 
-func (h *Handler) follow(w http.ResponseWriter, r *http.Request, l *Link) {
-	if err := RecordClick(r.Context(), h.Pool, l.ID, r.Referer(), r.UserAgent(), h.creatorHash(r)); err != nil {
+func (h *Handler) recordClick(r *http.Request, l *Link) {
+	if err := RecordClick(r.Context(), h.Pool, l.ID, r.Referer(), r.UserAgent(), h.creatorHash(r), h.visitorCountry(r)); err != nil {
 		log.Printf("[WARN] record click: %v", err)
 	}
-	http.Redirect(w, r, l.Original, http.StatusFound)
 }
 
-// Redirect sends visitors to the destination, or shows the unlock form for
-// password-protected links.
+// Redirect sends visitors to the destination. It also serves the preview page
+// ("/{code}+" or "?preview"), custom OG tags to social crawlers, and the unlock
+// form for password-protected links.
 func (h *Handler) Redirect(w http.ResponseWriter, r *http.Request) {
-	l := h.resolve(w, r)
+	code := chi.URLParam(r, "code")
+	preview := r.URL.Query().Has("preview")
+	if c, ok := strings.CutSuffix(code, "+"); ok {
+		code, preview = c, true
+	}
+	l := h.resolve(w, r, code)
 	if l == nil {
+		return
+	}
+	if preview {
+		dest := l.Original
+		if l.HasPassword {
+			dest = "" // don't leak a protected destination
+		}
+		renderPage(w, http.StatusOK, page{Title: "Link preview", Message: "This short link leads to:", Dest: dest, Continue: "/" + l.ShortCode})
+		return
+	}
+	if l.hasOG() && IsSocialCrawler(r.UserAgent()) {
+		renderOG(w, l)
 		return
 	}
 	if l.HasPassword {
 		renderPage(w, http.StatusOK, page{Title: "Protected link", Message: "Enter the password to continue.", Form: true})
 		return
 	}
-	h.follow(w, r, l)
+	h.recordClick(r, l)
+	http.Redirect(w, r, l.Original, http.StatusFound)
 }
 
 // Unlock handles the password form POSTed to /{code}.
 func (h *Handler) Unlock(w http.ResponseWriter, r *http.Request) {
-	l := h.resolve(w, r)
+	l := h.resolve(w, r, chi.URLParam(r, "code"))
 	if l == nil {
 		return
 	}
-	if !l.HasPassword {
-		h.follow(w, r, l)
-		return
-	}
-	if !auth.VerifyPassword(r.PostFormValue("password"), l.passwordHash) {
+	if l.HasPassword && !auth.VerifyPassword(r.PostFormValue("password"), l.passwordHash) {
 		renderPage(w, http.StatusUnauthorized, page{Title: "Protected link", Message: "Enter the password to continue.", Form: true, Error: "Incorrect password"})
 		return
 	}
 	// 303 so the browser follows with GET and doesn't resubmit the form.
-	if err := RecordClick(r.Context(), h.Pool, l.ID, r.Referer(), r.UserAgent(), h.creatorHash(r)); err != nil {
-		log.Printf("[WARN] record click: %v", err)
-	}
+	h.recordClick(r, l)
 	http.Redirect(w, r, l.Original, http.StatusSeeOther)
 }
 

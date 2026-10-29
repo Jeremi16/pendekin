@@ -109,6 +109,15 @@ func EnsureSchema(pool *pgxpool.Pool) error {
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
 		`CREATE INDEX IF NOT EXISTS nodryx_tokens_account_idx ON nodryx_tokens(account_id)`,
+		// Click limit, tags and custom social preview (OG) per link.
+		`ALTER TABLE links ADD COLUMN IF NOT EXISTS max_clicks INTEGER`,
+		`ALTER TABLE links ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}'`,
+		`ALTER TABLE links ADD COLUMN IF NOT EXISTS og_title TEXT`,
+		`ALTER TABLE links ADD COLUMN IF NOT EXISTS og_description TEXT`,
+		`ALTER TABLE links ADD COLUMN IF NOT EXISTS og_image TEXT`,
+		`CREATE INDEX IF NOT EXISTS links_tags_idx ON links USING GIN (tags)`,
+		`ALTER TABLE click_events ADD COLUMN IF NOT EXISTS country TEXT`,
+		`ALTER TABLE click_events ADD COLUMN IF NOT EXISTS os TEXT`,
 	}
 
 	for _, s := range stmts {

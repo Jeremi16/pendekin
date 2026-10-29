@@ -11,9 +11,9 @@ export function csvCell(v: unknown): string {
 }
 
 export function toCSV(links: DashLink[]): string {
-  const header = ["short_url", "original_url", "title", "clicks", "active", "password_protected", "expires_at", "last_clicked_at", "created_at"];
+  const header = ["short_url", "original_url", "title", "clicks", "active", "password_protected", "max_clicks", "tags", "expires_at", "last_clicked_at", "created_at"];
   const rows = links.map((l) =>
-    [l.short, l.original, l.title ?? "", l.clickCount, l.isActive, l.hasPassword, l.expiresAt ?? "", l.lastClickedAt ?? "", l.createdAt].map(csvCell).join(",")
+    [l.short, l.original, l.title ?? "", l.clickCount, l.isActive, l.hasPassword, l.maxClicks ?? "", l.tags.join("; "), l.expiresAt ?? "", l.lastClickedAt ?? "", l.createdAt].map(csvCell).join(",")
   );
   // BOM so Excel detects UTF-8 (titles may contain non-ASCII).
   return "﻿" + [header.join(","), ...rows].join("\r\n") + "\r\n";

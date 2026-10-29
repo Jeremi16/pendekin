@@ -24,6 +24,7 @@
     { "source": "/health", "destination": { "service": "backend" } },
     { "source": "/ready", "destination": { "service": "backend" } },
     { "source": "/:code([A-Za-z0-9_-]{4,32})", "destination": { "service": "backend" } },
+    { "source": "/:code([A-Za-z0-9_-]{4,32}\\+)", "destination": { "service": "backend" } },
     { "source": "/(.*)", "destination": { "service": "frontend" } }
   ]
 }

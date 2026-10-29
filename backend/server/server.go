@@ -90,6 +90,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) http.Handler {
 			r.Use(auth.Require, auth.RequireJSON)
 			r.Get("/summary", lh.DashSummary)
 			r.Get("/links", lh.DashLinks)
+			r.Get("/tags", lh.DashTags)
 			r.Patch("/links/{id}", lh.PatchLink)
 			r.Delete("/links/{id}", lh.DeleteLink)
 			r.Post("/links/bulk", lh.BulkLinks)

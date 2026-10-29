@@ -39,6 +39,10 @@ type Config struct {
 	NodryxAuthURL      string
 	NodryxClientID     string
 	NodryxClientSecret string
+
+	// Optional Google Safe Browsing API key; when set, destinations are checked
+	// for malware/phishing on create and edit.
+	SafeBrowsingKey string
 }
 
 // NodryxEnabled reports whether SSO login is fully configured.
@@ -96,6 +100,7 @@ func Load() *Config {
 		NodryxAuthURL:      strings.TrimRight(os.Getenv("NODRYX_AUTH_URL"), "/"),
 		NodryxClientID:     os.Getenv("NODRYX_CLIENT_ID"),
 		NodryxClientSecret: os.Getenv("NODRYX_CLIENT_SECRET"),
+		SafeBrowsingKey:    os.Getenv("SAFE_BROWSING_API_KEY"),
 	}
 }
 

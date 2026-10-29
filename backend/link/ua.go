@@ -1,6 +1,7 @@
 package link
 
 import (
+	"net/http"
 	"net/url"
 	"strings"
 )
@@ -52,4 +53,58 @@ func ReferrerHost(ref string) string {
 		return "Other"
 	}
 	return strings.TrimPrefix(strings.ToLower(u.Hostname()), "www.")
+}
+
+// ParseOS returns a coarse operating system name for a user agent.
+func ParseOS(ua string) string {
+	u := strings.ToLower(ua)
+	switch {
+	case u == "":
+		return "Unknown"
+	case strings.Contains(u, "iphone") || strings.Contains(u, "ipad") || strings.Contains(u, "ipod"):
+		return "iOS"
+	case strings.Contains(u, "android"):
+		return "Android"
+	case strings.Contains(u, "windows"):
+		return "Windows"
+	case strings.Contains(u, "cros"):
+		return "ChromeOS"
+	case strings.Contains(u, "mac os x") || strings.Contains(u, "macintosh"):
+		return "macOS"
+	case strings.Contains(u, "linux"):
+		return "Linux"
+	default:
+		return "Other"
+	}
+}
+
+// socialCrawlers are link-preview fetchers that read OG tags. Several (WhatsApp,
+// Telegram) don't say "bot", so they're matched by name.
+var socialCrawlers = []string{
+	"facebookexternalhit", "facebot", "twitterbot", "whatsapp", "telegrambot", "slackbot",
+	"discordbot", "linkedinbot", "skypeuripreview", "pinterest", "redditbot", "embedly",
+	"line-poker", "kakaotalk", "googlebot", "bingbot", "applebot", "mastodon",
+}
+
+// IsSocialCrawler reports whether ua is a link-preview / social crawler.
+func IsSocialCrawler(ua string) bool {
+	u := strings.ToLower(ua)
+	for _, c := range socialCrawlers {
+		if strings.Contains(u, c) {
+			return true
+		}
+	}
+	return false
+}
+
+// CountryFromHeaders reads the edge-provided visitor country (Vercel or
+// Cloudflare). Only call it when the proxy is trusted.
+func CountryFromHeaders(h http.Header) string {
+	for _, k := range []string{"X-Vercel-IP-Country", "CF-IPCountry"} {
+		v := strings.ToUpper(strings.TrimSpace(h.Get(k)))
+		if len(v) == 2 && v[0] >= 'A' && v[0] <= 'Z' && v[1] >= 'A' && v[1] <= 'Z' && v != "XX" {
+			return v
+		}
+	}
+	return ""
 }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { BarChart3, Check, ChevronLeft, Clock, History, MousePointerClick, ChevronRight, Copy, Download, ExternalLink, Inbox, Lock, Pencil, Search, Trash2, X } from "lucide-react";
+import { BarChart3, Check, Eye, Layers, Tag, ChevronLeft, Clock, History, MousePointerClick, ChevronRight, Copy, Download, ExternalLink, Inbox, Lock, Pencil, Search, Trash2, X } from "lucide-react";
 import { apiDelete, apiGet, apiPatch, apiPost } from "../lib/api";
 import { downloadText, fetchAllLinks, toCSV } from "../lib/csv";
 import { formatApiError } from "../lib/utils";
@@ -7,6 +7,7 @@ import { btnDanger, btnGhost, btnPrimary, card, field, iconBtn, label, linkStatu
 import BarChart from "../components/BarChart";
 import EditLinkDrawer, { Toggle } from "../components/EditLinkDrawer";
 import AnalyticsPanel from "../components/AnalyticsPanel";
+import BulkShorten from "../components/BulkShorten";
 import Select from "../components/Select";
 import Checkbox from "../components/Checkbox";
 
@@ -23,6 +24,9 @@ export default function Dashboard({ onToast }: { onToast: (t: { type: "success" 
   const [query, setQuery] = useState(""); // debounced search
   const [status, setStatus] = useState("all");
   const [sort, setSort] = useState("created");
+  const [tag, setTag] = useState("");
+  const [tags, setTags] = useState<{ tag: string; count: number }[]>([]);
+  const [bulkOpen, setBulkOpen] = useState(false);
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [editing, setEditing] = useState<DashLink | null>(null);
@@ -43,20 +47,25 @@ export default function Dashboard({ onToast }: { onToast: (t: { type: "success" 
     apiGet<Summary>("/dashboard/summary").then(setSummary).catch(() => {});
   }, []);
 
+  const loadTags = useCallback(() => {
+    apiGet<{ tags: { tag: string; count: number }[] }>("/dashboard/tags").then((d) => setTags(d.tags)).catch(() => {});
+  }, []);
+
   const loadLinks = useCallback(async () => {
     try {
-      const d = await apiGet<{ links: DashLink[]; total: number }>("/dashboard/links", { search: query, status, sort, page, limit: PAGE_SIZE });
+      const d = await apiGet<{ links: DashLink[]; total: number }>("/dashboard/links", { search: query, status, tag, sort, page, limit: PAGE_SIZE });
       setLinks(d.links);
       setTotal(d.total);
       setSelected(new Set());
     } catch (err) {
       onToast({ type: "error", text: formatApiError(err, "Failed to load links") });
     }
-  }, [query, status, sort, page, onToast]);
+  }, [query, status, tag, sort, page, onToast]);
 
   useEffect(() => {
     loadSummary();
-  }, [loadSummary]);
+    loadTags();
+  }, [loadSummary, loadTags]);
   useEffect(() => {
     loadLinks();
   }, [loadLinks]);
@@ -64,6 +73,7 @@ export default function Dashboard({ onToast }: { onToast: (t: { type: "success" 
   const refresh = () => {
     loadLinks();
     loadSummary();
+    loadTags();
   };
 
   function replaceLink(l: DashLink) {
@@ -173,6 +183,7 @@ export default function Dashboard({ onToast }: { onToast: (t: { type: "success" 
           <button onClick={exportCSV} disabled={!!exporting} className={btnGhost} aria-live="polite">
             <Download size={14} /> {exporting ? `Exporting ${exporting}…` : "Export CSV"}
           </button>
+          <button onClick={() => setBulkOpen(true)} className={btnGhost}><Layers size={14} /> Bulk shorten</button>
           <a href="#/" className={btnPrimary}>+ New link</a>
         </div>
       </div>
@@ -194,8 +205,18 @@ export default function Dashboard({ onToast }: { onToast: (t: { type: "success" 
           <Search size={14} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500" />
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search title, URL or code" aria-label="Search links" className={`${field} pl-10`} />
         </div>
-        <div className="flex gap-2">
-          <Seg value={status} onChange={(v) => { setStatus(v); setPage(1); }} options={[["all", "All"], ["active", "Active"], ["inactive", "Off"], ["expired", "Expired"]]} label="Status" />
+        <div className="flex flex-wrap gap-2">
+          <Seg value={status} onChange={(v) => { setStatus(v); setPage(1); }} options={[["all", "All"], ["active", "Active"], ["inactive", "Off"], ["expired", "Expired"], ["limit", "Used up"]]} label="Status" />
+          {tags.length > 0 && (
+            <Select
+              aria-label="Tag"
+              value={tag}
+              onChange={(v) => { setTag(v); setPage(1); }}
+              align="right"
+              className="w-40 shrink-0"
+              options={[{ value: "", label: "All tags", icon: <Tag size={14} className="shrink-0" /> }, ...tags.map((t) => ({ value: t.tag, label: `${t.tag} (${t.count})` }))]}
+            />
+          )}
           <Select
             aria-label="Sort"
             value={sort}
@@ -224,7 +245,7 @@ export default function Dashboard({ onToast }: { onToast: (t: { type: "success" 
 
       {/* List */}
       <div className={`${card} overflow-hidden`}>
-        <div className="hidden grid-cols-[28px_minmax(0,1fr)_90px_70px_120px] items-center gap-4 border-b border-neutral-900 px-4 py-2.5 md:grid">
+        <div className="hidden grid-cols-[28px_minmax(0,1fr)_90px_70px_160px] items-center gap-4 border-b border-neutral-900 px-4 py-2.5 md:grid">
           <Checkbox checked={allOnPage} indeterminate={!allOnPage && selected.size > 0} onChange={toggleAll} aria-label="Select all on page" />
           <span className={label}>Link</span>
           <span className={label}>Clicks</span>
@@ -236,21 +257,24 @@ export default function Dashboard({ onToast }: { onToast: (t: { type: "success" 
           <p className="px-4 py-12 text-center text-sm text-neutral-500">Loading…</p>
         ) : links.length === 0 ? (
           <div className="px-4 py-14 text-center">
-            <p className="text-sm text-neutral-300">{query || status !== "all" ? "No links match these filters." : "No links yet."}</p>
-            <p className="mt-1 text-xs text-neutral-500">{query || status !== "all" ? "Try clearing the search or status filter." : "Shorten your first link, or claim ones you made before logging in."}</p>
+            <p className="text-sm text-neutral-300">{query || tag || status !== "all" ? "No links match these filters." : "No links yet."}</p>
+            <p className="mt-1 text-xs text-neutral-500">{query || tag || status !== "all" ? "Try clearing the search or status filter." : "Shorten your first link, or claim ones you made before logging in."}</p>
           </div>
         ) : (
           <ul className="divide-y divide-neutral-900">
             {links.map((l) => {
               const st = linkStatus(l);
               return (
-                <li key={l.id} className={`grid grid-cols-[28px_minmax(0,1fr)] items-center gap-x-4 gap-y-2 px-4 py-3 md:grid-cols-[28px_minmax(0,1fr)_90px_70px_120px] ${selected.has(l.id) ? "bg-neutral-900/70" : ""}`}>
+                <li key={l.id} className={`grid grid-cols-[28px_minmax(0,1fr)] items-center gap-x-4 gap-y-2 px-4 py-3 md:grid-cols-[28px_minmax(0,1fr)_90px_70px_160px] ${selected.has(l.id) ? "bg-neutral-900/70" : ""}`}>
                   <Checkbox checked={selected.has(l.id)} onChange={() => toggleOne(l.id)} aria-label={`Select ${stripProto(l.short)}`} />
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <a href={l.short} target="_blank" rel="noreferrer" className="truncate text-sm font-medium text-white hover:underline">{stripProto(l.short)}</a>
                       {l.hasPassword && <Lock size={12} className="shrink-0 text-neutral-500" aria-label="Password protected" />}
-                      {st !== "active" && <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${st === "expired" ? "bg-amber-950/60 text-amber-300" : "bg-neutral-800 text-neutral-400"}`}>{st === "inactive" ? "off" : st}</span>}
+                      {st !== "active" && <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${st === "expired" || st === "limit" ? "bg-amber-950/60 text-amber-300" : "bg-neutral-800 text-neutral-400"}`}>{st === "inactive" ? "off" : st === "limit" ? "used up" : st}</span>}
+                      {l.tags.map((t) => (
+                        <button key={t} onClick={() => { setTag(t); setPage(1); }} className="shrink-0 rounded-full border border-neutral-800 px-2 py-0.5 text-[10px] text-neutral-400 hover:text-white">#{t}</button>
+                      ))}
                     </div>
                     <p className="truncate text-xs text-neutral-500">
                       {l.title ? <span className="text-neutral-400">{l.title} · </span> : null}
@@ -259,6 +283,7 @@ export default function Dashboard({ onToast }: { onToast: (t: { type: "success" 
                     <p className="mt-0.5 text-[11px] text-neutral-600">
                       {new Date(l.createdAt).toLocaleDateString()}
                       {l.expiresAt && ` · expires ${new Date(l.expiresAt).toLocaleString()}`}
+                      {l.maxClicks !== null && ` · ${l.clickCount}/${l.maxClicks} clicks`}
                     </p>
                   </div>
                   {/* Mobile: meta row under the link; desktop: own columns */}
@@ -267,6 +292,7 @@ export default function Dashboard({ onToast }: { onToast: (t: { type: "success" 
                     <Toggle checked={l.isActive} onChange={(v) => toggleActive(l, v)} label={`Active: ${stripProto(l.short)}`} />
                     <div className="flex justify-end">
                       <button onClick={() => copy(l.short)} aria-label="Copy" title="Copy" className={iconBtn}>{copied === l.short ? <Check size={15} /> : <Copy size={15} />}</button>
+                      <a href={`${l.short}+`} target="_blank" rel="noreferrer" aria-label="Preview page" title="Preview page (short link + “+”)" className={`${iconBtn} hidden sm:inline-flex`}><Eye size={15} /></a>
                       <button onClick={() => setViewing(l)} aria-label="Analytics" title="Analytics" className={iconBtn}><BarChart3 size={15} /></button>
                       <button onClick={() => setEditing(l)} aria-label="Edit" title="Edit" className={iconBtn}><Pencil size={15} /></button>
                       <button onClick={() => askDelete(l)} aria-label="Delete" title="Delete" className={`${iconBtn} hover:text-red-300`}><Trash2 size={15} /></button>
@@ -302,11 +328,12 @@ export default function Dashboard({ onToast }: { onToast: (t: { type: "success" 
           }}
         />
       )}
+      {bulkOpen && <BulkShorten onClose={() => setBulkOpen(false)} onDone={refresh} />}
       {viewing && <AnalyticsPanel link={viewing} onClose={() => setViewing(null)} />}
       {confirm && <ConfirmDialog c={confirm} onClose={() => setConfirm(null)} onError={(t) => onToast({ type: "error", text: t })} />}
 
       <p className="flex items-center justify-center gap-1.5 text-xs text-neutral-600">
-        <ExternalLink size={11} /> Short links open for visitors without login. Turned-off, expired and protected links show a pendekin page.
+        <ExternalLink size={11} /> Short links open for visitors without login. Turned-off, expired, used-up and protected links show a pendekin page. Add “+” to any short link to preview its destination.
       </p>
     </div>
   );

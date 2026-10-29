@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Lock } from "lucide-react";
+import { Lock, Share2 } from "lucide-react";
 import Sheet from "./Sheet";
 import ColorPicker from "./ColorPicker";
 import Select from "./Select";
@@ -8,7 +8,7 @@ import useQrCode from "../hooks/useQrCode";
 import { apiPatch } from "../lib/api";
 import { CORNER_STYLES, DEFAULT_SETTINGS, QR_STYLES } from "../lib/constants";
 import { formatApiError } from "../lib/utils";
-import { btnGhost, btnPrimary, field, label, stripProto, toLocalInput, type DashLink } from "../lib/ui";
+import { btnGhost, btnPrimary, field, label, parseTags, stripProto, toLocalInput, type DashLink } from "../lib/ui";
 
 type Props = { link: DashLink; onClose: () => void; onSaved: (l: DashLink) => void };
 
@@ -20,6 +20,11 @@ export default function EditLinkDrawer({ link, onClose, onSaved }: Props) {
   // Password: "keep" leaves it unchanged; "set" uses newPassword; "remove" clears it.
   const [pwMode, setPwMode] = useState<"keep" | "set" | "remove">(link.hasPassword ? "keep" : "remove");
   const [newPassword, setNewPassword] = useState("");
+  const [maxClicks, setMaxClicks] = useState(link.maxClicks ? String(link.maxClicks) : "");
+  const [tags, setTags] = useState(link.tags.join(", "));
+  const [ogTitle, setOgTitle] = useState(link.ogTitle ?? "");
+  const [ogDescription, setOgDescription] = useState(link.ogDescription ?? "");
+  const [ogImage, setOgImage] = useState(link.ogImage ?? "");
   const [qr, setQr] = useState({ ...DEFAULT_SETTINGS, ...(link.qrConfig as Partial<typeof DEFAULT_SETTINGS>) });
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -38,6 +43,11 @@ export default function EditLinkDrawer({ link, onClose, onSaved }: Props) {
       isActive,
       expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
       qrConfig: qr,
+      maxClicks: maxClicks ? Number(maxClicks) : null,
+      tags: parseTags(tags),
+      ogTitle: ogTitle || null,
+      ogDescription: ogDescription || null,
+      ogImage: ogImage || null,
     };
     if (pwMode === "set") {
       if (newPassword.length < 4) {
@@ -95,6 +105,25 @@ export default function EditLinkDrawer({ link, onClose, onSaved }: Props) {
             {expiresAt && <button type="button" onClick={() => setExpiresAt("")} className="text-xs text-neutral-500 hover:text-white">Remove expiry</button>}
           </div>
           <ExpiryPicker id="e-exp" value={expiresAt} onChange={setExpiresAt} />
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <label htmlFor="e-max" className={`${label} px-1`}>Click limit</label>
+            <input id="e-max" type="number" min={1} inputMode="numeric" value={maxClicks} onChange={(e) => setMaxClicks(e.target.value)} placeholder="Unlimited" className={field} />
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor="e-tags" className={`${label} px-1`}>Tags</label>
+            <input id="e-tags" value={tags} onChange={(e) => setTags(e.target.value)} placeholder="promo, instagram" className={field} />
+          </div>
+        </div>
+
+        <div className="space-y-2 rounded-2xl border border-neutral-800 p-4">
+          <p className="flex items-center gap-2 text-sm text-white"><Share2 size={14} /> Social preview</p>
+          <p className="text-xs text-neutral-500">Shown when the link is shared on WhatsApp, X, Facebook, Telegram… Leave empty to use the destination's own preview.</p>
+          <input value={ogTitle} onChange={(e) => setOgTitle(e.target.value)} placeholder="Preview title" maxLength={120} className={field} aria-label="Preview title" />
+          <input value={ogDescription} onChange={(e) => setOgDescription(e.target.value)} placeholder="Preview description" maxLength={300} className={field} aria-label="Preview description" />
+          <input value={ogImage} onChange={(e) => setOgImage(e.target.value)} placeholder="Image URL (https://…)" className={field} aria-label="Preview image URL" />
         </div>
 
         <div className="space-y-2 rounded-2xl border border-neutral-800 p-4">
