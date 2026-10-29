@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { BarChart3, Check, Copy, CornerDownRight, ExternalLink, Link2, LogIn, QrCode, Settings as SettingsIcon, Sparkles, X } from "lucide-react";
+import { BarChart3, Check, Copy, CornerDownRight, ExternalLink, Link2, LogIn, QrCode, History, Settings as SettingsIcon, X } from "lucide-react";
 import { apiGet, apiPost, loginRedirect, type Account } from "./lib/api";
 import { APP_BASE_URL, CORNER_STYLES, DEFAULT_SETTINGS, QR_STYLES } from "./lib/constants";
 import { cn, formatApiError, loadRecent, plausibleUrl, saveRecent } from "./lib/utils";
@@ -396,7 +396,7 @@ export default function App() {
           {recent.length > 0 && (
             <div className="mt-8 px-2">
               <div className="mb-2 flex items-center justify-between">
-                <p className="flex items-center gap-1.5 text-xs text-neutral-500"><Sparkles size={12} /> Recent</p>
+                <p className="flex items-center gap-1.5 text-xs text-neutral-500"><History size={12} /> Recent</p>
                 <button onClick={() => { localStorage.removeItem("pendekin_recent"); setRecent([]); }} className="text-xs text-neutral-600 hover:text-neutral-300">Clear</button>
               </div>
               <ul className="divide-y divide-neutral-900">
