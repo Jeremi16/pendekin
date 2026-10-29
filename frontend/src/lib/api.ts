@@ -1,6 +1,6 @@
 export const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
-export type Account = { id: number; email: string; createdAt: string };
+export type Account = { id: number; email: string; name: string; createdAt: string };
 
 // Login is exclusively via Nodryx SSO: the backend owns the OAuth flow and the
 // session cookie, so the app only redirects there and never sees tokens.

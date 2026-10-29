@@ -224,6 +224,11 @@ func (n *Nodryx) Callback(w http.ResponseWriter, r *http.Request) {
 		n.errorPage(w, r, http.StatusInternalServerError, "Something went wrong", "Your account could not be prepared. Please try logging in again.")
 		return
 	}
+	if name := strings.TrimSpace(user.Name); name != "" {
+		if _, err := n.Pool.Exec(r.Context(), `UPDATE accounts SET name = $2 WHERE id = $1`, accountID, name); err != nil {
+			log.Printf("[WARN] update account name: %v", err)
+		}
+	}
 	token, err := startSession(n.Pool, w, r, accountID)
 	if err != nil {
 		log.Printf("[ERROR] nodryx start session: %v", err)
@@ -279,7 +284,8 @@ type nodryxUser struct {
 	Sub           string `json:"sub"`
 	Email         string `json:"email"`
 	EmailVerified bool   `json:"email_verified"`
-	Provider      string `json:"provider"`
+	Name          string `json:"name"`
+	Provider     string `json:"provider"`
 }
 
 // validEmail mirrors the check previously shared with password login.

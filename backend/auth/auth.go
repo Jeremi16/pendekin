@@ -25,6 +25,7 @@ const (
 type Account struct {
 	ID        int64     `json:"id"`
 	Email     string    `json:"email"`
+	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
@@ -58,8 +59,8 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 		}
 		var a Account
 		err = s.Pool.QueryRow(r.Context(),
-			`SELECT a.id, a.email, a.created_at FROM account_sessions s JOIN accounts a ON a.id = s.account_id
-			 WHERE s.token_hash = $1 AND s.expires_at > NOW()`, hashToken(c.Value)).Scan(&a.ID, &a.Email, &a.CreatedAt)
+			`SELECT a.id, a.email, a.name, a.created_at FROM account_sessions s JOIN accounts a ON a.id = s.account_id
+			 WHERE s.token_hash = $1 AND s.expires_at > NOW()`, hashToken(c.Value)).Scan(&a.ID, &a.Email, &a.Name, &a.CreatedAt)
 		if err != nil {
 			if !errors.Is(err, pgx.ErrNoRows) {
 				log.Printf("[WARN] session lookup: %v", err)

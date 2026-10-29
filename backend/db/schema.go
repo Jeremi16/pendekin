@@ -88,6 +88,8 @@ func EnsureSchema(pool *pgxpool.Pool) error {
 			PRIMARY KEY (provider, subject)
 		)`,
 		`CREATE INDEX IF NOT EXISTS auth_identities_account_idx ON auth_identities(account_id)`,
+		// Display name, synced from the Nodryx profile on each login.
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT ''`,
 		// Server-side OAuth flow storage: state + PKCE verifier, single-use, short TTL.
 		`CREATE TABLE IF NOT EXISTS oauth_flows (
 			state TEXT PRIMARY KEY,
